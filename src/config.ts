@@ -15,9 +15,6 @@ export const MARKETPLACES: Record<MarketplaceCode, Marketplace> = {
   AU: { code: "AU", tld: "com.au", host: "www.amazon.com.au", acceptLanguage: "en-AU,en;q=0.9", currency: "AUD", tagSuffix: "22" },
 };
 
-/** Placeholder tag used when the user has not configured a real Associates tag. */
-export const PLACEHOLDER_TAG = "amazonmcp00-20";
-
 export function resolveMarketplace(code?: string): Marketplace {
   const fallback = (process.env.AMAZON_DEFAULT_MARKETPLACE || "US").toUpperCase();
   const key = (code || fallback).toUpperCase() as MarketplaceCode;

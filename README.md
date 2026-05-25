@@ -46,7 +46,7 @@ To actually earn, you must:
 - Sign up for the Amazon Associates program at **<https://affiliate-program.amazon.com/>** (each marketplace is a separate program with its own tag).
 - Configure your real tag(s) via the `AMAZON_ASSOCIATE_TAG_<CODE>` environment variables (see [Configuration](#configuration)).
 
-> If you do not configure a tag, the server falls back to a built-in **placeholder tag** so that links still work — but **you earn nothing**. The placeholder is clearly flagged in every buy-link response.
+> If you do not configure a tag, links are emitted **untagged** — they still work, but earn no commission. Every buy-link response states clearly whether a tag was applied. The tag is read from the environment (e.g. a local, git-ignored `.env`) and is never stored in source.
 
 This is link-based attribution, the same mechanism behind any "as an Amazon Associate I earn from qualifying purchases" link. Nothing more.
 

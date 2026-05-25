@@ -94,9 +94,9 @@ export interface BuyLink {
   productUrl: string;
   /** One-click add-to-cart URL with affiliate tag. */
   addToCartUrl: string;
-  associateTag: string;
-  /** True when the tag is the placeholder (user earns no commission). */
-  usingPlaceholderTag: boolean;
+  associateTag: string | null;
+  /** True when a real associate tag was applied (i.e. the link earns commission). */
+  tagged: boolean;
   note: string;
 }
 

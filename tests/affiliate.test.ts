@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PLACEHOLDER_TAG } from "../src/config.js";
 import {
   buildAddToCartUrl,
   buildBuyLink,
@@ -24,22 +23,25 @@ describe("affiliate — with AMAZON_ASSOCIATE_TAG_US set", () => {
     expect(u.searchParams.get("tag")).toBe("mytag-20");
   });
 
-  it("resolveAssociateTag reports isPlaceholder=false when configured", () => {
-    const { tag, isPlaceholder } = resolveAssociateTag("US");
-    expect(tag).toBe("mytag-20");
-    expect(isPlaceholder).toBe(false);
+  it("resolveAssociateTag returns the configured tag", () => {
+    expect(resolveAssociateTag("US")).toBe("mytag-20");
   });
 
-  it("buildBuyLink reports usingPlaceholderTag=false", () => {
+  it("buildBuyLink reports tagged=true", () => {
     const link = buildBuyLink("B08N5WRWNW", "US");
-    expect(link.usingPlaceholderTag).toBe(false);
+    expect(link.tagged).toBe(true);
     expect(link.associateTag).toBe("mytag-20");
+  });
+
+  it("falls back to the generic AMAZON_ASSOCIATE_TAG when no per-marketplace tag", () => {
+    vi.stubEnv("AMAZON_ASSOCIATE_TAG_US", "");
+    vi.stubEnv("AMAZON_ASSOCIATE_TAG", "global-21");
+    expect(resolveAssociateTag("DE")).toBe("global-21");
   });
 });
 
-describe("affiliate — without any tag env (placeholder fallback)", () => {
+describe("affiliate — without any tag env (untagged links)", () => {
   beforeEach(() => {
-    // Ensure no leaked env from the shell/process.
     vi.stubEnv("AMAZON_ASSOCIATE_TAG_US", "");
     vi.stubEnv("AMAZON_ASSOCIATE_TAG", "");
   });
@@ -47,22 +49,29 @@ describe("affiliate — without any tag env (placeholder fallback)", () => {
     vi.unstubAllEnvs();
   });
 
-  it("withAffiliateTag falls back to the placeholder tag", () => {
+  it("resolveAssociateTag returns null", () => {
+    expect(resolveAssociateTag("US")).toBeNull();
+  });
+
+  it("withAffiliateTag leaves the URL untagged (no tag, no linkCode)", () => {
     const out = withAffiliateTag("https://www.amazon.com/dp/B08N5WRWNW", "US");
     const u = new URL(out);
-    expect(u.searchParams.get("tag")).toBe(PLACEHOLDER_TAG);
+    expect(u.searchParams.get("tag")).toBeNull();
+    expect(u.searchParams.has("linkCode")).toBe(false);
   });
 
-  it("resolveAssociateTag reports isPlaceholder=true", () => {
-    const { tag, isPlaceholder } = resolveAssociateTag("US");
-    expect(tag).toBe(PLACEHOLDER_TAG);
-    expect(isPlaceholder).toBe(true);
-  });
-
-  it("buildBuyLink reports usingPlaceholderTag=true and note mentions placeholder", () => {
+  it("buildBuyLink reports tagged=false, null tag, and a clear note", () => {
     const link = buildBuyLink("B08N5WRWNW", "US");
-    expect(link.usingPlaceholderTag).toBe(true);
-    expect(link.note.toLowerCase()).toContain("placeholder");
+    expect(link.tagged).toBe(false);
+    expect(link.associateTag).toBeNull();
+    expect(link.note.toLowerCase()).toContain("no commission");
+  });
+
+  it("buildAddToCartUrl omits AssociateTag when untagged", () => {
+    const u = new URL(buildAddToCartUrl("B08N5WRWNW", "US"));
+    expect(u.searchParams.get("ASIN.1")).toBe("B08N5WRWNW");
+    expect(u.searchParams.get("AssociateTag")).toBeNull();
+    expect(u.searchParams.get("tag")).toBeNull();
   });
 });
 
@@ -86,7 +95,6 @@ describe("withAffiliateTag — query param handling", () => {
     const out = withAffiliateTag("https://www.amazon.com/dp/B08N5WRWNW?tag=old-20", "US");
     const u = new URL(out);
     expect(u.searchParams.get("tag")).toBe("mytag-20");
-    // No duplicate tag params.
     expect(u.searchParams.getAll("tag")).toEqual(["mytag-20"]);
   });
 });
@@ -127,8 +135,7 @@ describe("buildAddToCartUrl", () => {
   });
 
   it("defaults quantity to 1", () => {
-    const out = buildAddToCartUrl("B08N5WRWNW", "US");
-    const u = new URL(out);
+    const u = new URL(buildAddToCartUrl("B08N5WRWNW", "US"));
     expect(u.searchParams.get("Quantity.1")).toBe("1");
   });
 });

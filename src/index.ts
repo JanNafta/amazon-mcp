@@ -282,7 +282,7 @@ server.registerTool(
       `Affiliate buy links for ${a} (Amazon ${code}):\n\n` +
         `Product page: ${link.productUrl}\n` +
         `Add to cart:  ${link.addToCartUrl}\n\n` +
-        `Associate tag: ${link.associateTag}\n` +
+        `Associate tag: ${link.associateTag ?? "(none configured)"}\n` +
         `${link.note}`,
     );
   },
