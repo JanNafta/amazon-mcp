@@ -141,7 +141,7 @@ export async function getProductDetails(
 
   const title = firstText($, ["#productTitle", "#title", "h1#title span"]);
 
-  const price = parsePrice(
+  let price = parsePrice(
     firstText($, [
       ".a-price .a-offscreen",
       "#corePrice_feature_div .a-offscreen",
@@ -151,6 +151,21 @@ export async function getProductDetails(
       "#price_inside_buybox",
     ]),
   );
+  // Some layouts leave .a-offscreen empty and render the visible price in split nodes
+  // (.a-price-whole + .a-price-fraction). Recover it from those when needed.
+  if (price == null) {
+    for (const scope of ["#corePrice_desktop", "#corePriceDisplay_desktop_feature_div", "#corePrice_feature_div", "#apex_desktop"]) {
+      const whole = $(`${scope} .a-price-whole`).first().text().replace(/[^\d]/g, "");
+      const frac = $(`${scope} .a-price-fraction`).first().text().replace(/[^\d]/g, "");
+      if (whole) {
+        const n = parseFloat(`${whole}.${frac || "0"}`);
+        if (Number.isFinite(n)) {
+          price = n;
+          break;
+        }
+      }
+    }
+  }
 
   const ratingRaw =
     firstAttr($, ["#acrPopover"], "title") ??

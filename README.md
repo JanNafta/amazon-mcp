@@ -12,7 +12,7 @@ An MCP server for Amazon: product search, price history (Camelizer-style), deals
 
 - **Product search** — keyword search returning title, price, rating, image, and an affiliate buy link per result.
 - **Product details by ASIN** — full details: price, rating, features, availability, brand, and category breadcrumbs.
-- **Price history (Camelizer-style)** — current / lowest-ever / highest-ever / average prices, percent off the all-time high, a **buy/wait verdict**, and a price-chart image URL, sourced from [CamelCamelCamel](https://camelcamelcamel.com/).
+- **Price history (Camelizer-style)** — a **local price history** that grows as you use it: current / lowest / highest / average prices, percent off the tracked high, and a **buy/wait verdict**. Best-effort [CamelCamelCamel](https://camelcamelcamel.com/) enrichment when reachable (see [Limitations](#limitations)).
 - **Deals** — current discounted products, filterable by category keyword and minimum discount percentage.
 - **Price-drop watches** — track an ASIN with a target price, stored locally in SQLite; re-check on demand and get flagged when the target is met.
 - **Multi-marketplace comparison** — look up the same ASIN across several Amazon marketplaces side by side.
@@ -149,7 +149,7 @@ Fetch full details for a product by ASIN: title, price, rating, features, availa
 
 ### `get_price_history`
 
-Get historical price analysis for an ASIN from CamelCamelCamel: current, lowest-ever, highest-ever and average prices, percent off the all-time high, a buy/wait verdict, and a price chart image URL. Also merges any locally-tracked prices.
+Price history and buy/wait analysis for an ASIN. Builds a **local price history** over time — each lookup records the current price, then computes lowest / highest / average and a buy-wait verdict from your own tracked data. It also makes a best-effort attempt at CamelCamelCamel and merges its numbers when reachable (see [Limitations](#limitations)). The more often you look a product up, the richer its trend.
 
 | Argument | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -242,16 +242,28 @@ Once connected, ask Claude things like:
 
 ## How price history works
 
-Price history comes from **[CamelCamelCamel](https://camelcamelcamel.com/)** (CCC), scraped from its public per-marketplace product pages. The server parses the price table (current / lowest / highest / average plus the lowest- and highest-price dates), computes how far the current price sits below the all-time high, and derives a human **buy/wait verdict**:
+Price history is **local-first**. Every time a product price is fetched (via `get_product`, `get_price_history`, or a `checkNow` watch refresh), the server records it to a **local SQLite history** at `~/.amazon-mcp/cache.db`. `get_price_history` then computes lowest / highest / average and how far the current price sits below the tracked high, and derives a human **buy/wait verdict**:
 
-- *"At or near the lowest price ever — great time to buy"*
+- *"At or near the lowest tracked price — great time to buy"*
 - *"Below average — good deal"*
 - *"Around the average price"*
 - *"Above average — consider waiting"*
+- *"Not enough history yet — look this product up a few more times to build a trend"*
 
-CCC tracks data per marketplace on country subdomains. Price history is available for these marketplaces: **US, UK, DE, FR, IT, ES, CA, JP**. For other marketplaces the tool returns a well-formed response indicating that history is not available there. The CCC chart image URL is included whenever the marketplace is supported, and it often keeps working even when the HTML page is blocked.
+This means a product's trend **starts empty and grows as you use it**. To seed a baseline quickly, look a product up a few times (or add a price watch and refresh it with `checkNow`).
 
-In addition, every time a product price is fetched (via `get_product`, `get_price_history`, or a `checkNow` watch refresh), the server logs it to a **local SQLite history** at `~/.amazon-mcp/cache.db`. Those locally-tracked prices are merged into `get_price_history` output so you build your own price log over time. The same SQLite database backs the response cache and stored price watches.
+The server also makes a **best-effort** attempt at **[CamelCamelCamel](https://camelcamelcamel.com/)** and merges its numbers when reachable — but CCC is Cloudflare-protected and usually unavailable over plain HTTP (see [Limitations](#limitations)). The same SQLite database backs the response cache and stored price watches.
+
+## Limitations
+
+This server scrapes public HTML, so it is subject to the anti-bot measures of the sites it reads. Observed behavior:
+
+- **CamelCamelCamel is Cloudflare-protected.** Its product pages and chart CDN return `HTTP 403` ("Just a moment…") to plain HTTP clients, so live CCC history/charts are generally **not** available without a real browser. The server detects this and transparently falls back to local price tracking. If you need full historical data on day one, plug in the [Keepa API](https://keepa.com/#!api) (official, not blocked) — the price-history layer is structured so an alternative source can be added.
+- **Some Amazon marketplaces serve an AWS WAF JS challenge** (observed on `amazon.co.uk`). When that happens a request can't be scraped over HTTP and the tool reports it clearly instead of failing silently. The US marketplace is the most reliable; others vary by IP and load.
+- **Product-page prices are best-effort.** Amazon hydrates the price with JavaScript on many detail pages, so `get_product` may return a `null` price even when the page loads. `search_products` is server-rendered and returns prices reliably — prefer it when you need a price.
+- **No proxies / no JS engine.** The client rotates user-agents, follows bot-manager meta-refresh challenges (carrying cookies), retries with backoff, and detects CAPTCHA / WAF / Cloudflare pages — but it does not solve JS challenges or rotate IPs. Under heavy use Amazon may rate-limit the source IP temporarily.
+
+For a fully reliable, ToS-clean data source, use the official **[Amazon Product Advertising API](https://webservices.amazon.com/paapi5/documentation/)** (requires an approved Associates account) or **Keepa** for price history.
 
 ## Development
 

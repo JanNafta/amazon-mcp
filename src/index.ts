@@ -32,7 +32,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { loadConfig, MARKETPLACES } from "./config.js";
-import type { MarketplaceCode } from "./types.js";
+import type { MarketplaceCode, PriceHistory } from "./types.js";
 import { buildBuyLink } from "./lib/affiliate.js";
 import { searchProducts, getProductDetails } from "./lib/amazon-scraper.js";
 import { getPriceHistory } from "./lib/camelcamelcamel.js";
@@ -148,7 +148,7 @@ server.registerTool(
   {
     title: "Get price history (Camelizer-style)",
     description:
-      "Get historical price analysis for an ASIN from CamelCamelCamel: current, lowest-ever, highest-ever and average prices, percent off the all-time high, a buy/wait verdict, and a price chart image URL. Also merges any locally-tracked prices.",
+      "Price history and buy/wait analysis for an ASIN. Builds a LOCAL price history over time: each lookup records the current price, then computes lowest/highest/average and a buy-wait verdict from your own tracked data. Also makes a best-effort attempt at CamelCamelCamel (frequently Cloudflare-blocked) and merges its data when available. The more you look up a product, the richer its trend.",
     inputSchema: {
       asin: z.string().regex(/^[A-Z0-9]{10}$/i).describe("10-character Amazon ASIN"),
       marketplace: marketplaceSchema,
@@ -157,28 +157,72 @@ server.registerTool(
   async ({ asin, marketplace }) => {
     const code = mp(marketplace);
     const a = asin.toUpperCase();
+    let currency = MARKETPLACES[code].currency;
+
+    // 1) Current price from the product page (works where Amazon isn't WAF-gated). Record it.
+    let currentPrice: number | null = null;
     try {
-      const key = `pricehist:${code}:${a}`;
-      const h = await getOrFetch(key, config.cacheTtlPriceHistory, () => getPriceHistory(a, code));
-      const local = getPriceLog(a, code, 5);
-      const localStr = local.length
-        ? `\n\nRecently tracked here:\n${local.map((p) => `  ${p.date.slice(0, 10)}: ${money(p.price, h.currency)}`).join("\n")}`
-        : "";
-      const drop = h.dropFromHighPct != null ? `${h.dropFromHighPct}% below all-time high` : "—";
-      return text(
-        `Price history for ${a} (Amazon ${code}) — ${h.verdict}\n\n` +
-          `Current:     ${money(h.current, h.currency)}\n` +
-          `Lowest ever: ${money(h.lowest, h.currency)}${h.lowestDate ? ` (${h.lowestDate})` : ""}\n` +
-          `Highest ever:${money(h.highest, h.currency)}${h.highestDate ? ` (${h.highestDate})` : ""}\n` +
-          `Average:     ${money(h.average, h.currency)}\n` +
-          `Drop:        ${drop}\n` +
-          `Source:      ${h.source}\n` +
-          `${h.chartUrl ? `Chart: ${h.chartUrl}` : ""}` +
-          localStr,
-      );
-    } catch (e) {
-      return errorText(`Could not fetch price history for ${a}: ${(e as Error).message}`);
+      const prod = await getOrFetch(`product:${code}:${a}`, config.cacheTtlProduct, () => getProductDetails(a, code));
+      currency = prod.currency || currency;
+      if (prod.price != null) {
+        currentPrice = prod.price;
+        logPrice(a, code, prod.price);
+      }
+    } catch {
+      /* product page blocked — fall back to whatever history exists */
     }
+
+    // 2) Best-effort CamelCamelCamel (usually Cloudflare-blocked; treated as bonus data).
+    let ccc: PriceHistory | null = null;
+    try {
+      ccc = await getOrFetch(`pricehist:${code}:${a}`, config.cacheTtlPriceHistory, () => getPriceHistory(a, code));
+      if (ccc && ccc.current == null && ccc.lowest == null && ccc.highest == null) ccc = null;
+    } catch {
+      ccc = null;
+    }
+
+    // 3) Local history (source of truth here).
+    const log = getPriceLog(a, code, 1000);
+    const prices = log.map((p) => p.price);
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const localLowest = prices.length ? Math.min(...prices) : null;
+    const localHighest = prices.length ? Math.max(...prices) : null;
+    const localAvg = prices.length ? round2(prices.reduce((x, y) => x + y, 0) / prices.length) : null;
+
+    // 4) Merge: prefer CCC where it has data, else local.
+    const current = currentPrice ?? ccc?.current ?? log[0]?.price ?? null;
+    const lowest = ccc?.lowest ?? localLowest;
+    const highest = ccc?.highest ?? localHighest;
+    const average = ccc?.average ?? localAvg;
+    const source = ccc ? "camelcamelcamel + local" : "local price tracking";
+    const dropFromHigh = current != null && highest != null && highest > 0 ? Math.round((1 - current / highest) * 1000) / 10 : null;
+
+    let verdict: string;
+    if (current == null) verdict = "Current price unknown (Amazon page blocked or unavailable).";
+    else if (lowest != null && current <= lowest * 1.01) verdict = "At or near the lowest tracked price — great time to buy.";
+    else if (average != null && current < average * 0.9) verdict = "Below average — good deal.";
+    else if (average != null && current > average * 1.1) verdict = "Above average — consider waiting.";
+    else if (average != null) verdict = "Around the average price.";
+    else verdict = "Not enough history yet — look this product up a few more times to build a trend.";
+
+    const drop = dropFromHigh != null ? `${dropFromHigh}% below tracked high` : "—";
+    const recent = log.slice(0, 6);
+    const recentStr = recent.length
+      ? `\n\nTracked prices (${prices.length} point${prices.length === 1 ? "" : "s"}):\n${recent
+          .map((p) => `  ${p.date.slice(0, 10)}: ${money(p.price, currency)}`)
+          .join("\n")}`
+      : "";
+
+    return text(
+      `Price history for ${a} (Amazon ${code}) — ${verdict}\n\n` +
+        `Current: ${money(current, currency)}\n` +
+        `Lowest:  ${money(lowest, currency)}\n` +
+        `Highest: ${money(highest, currency)}\n` +
+        `Average: ${money(average, currency)}\n` +
+        `Drop:    ${drop}\n` +
+        `Source:  ${source}` +
+        recentStr,
+    );
   },
 );
 

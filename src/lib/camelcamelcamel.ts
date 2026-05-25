@@ -186,7 +186,8 @@ export async function getPriceHistory(
   try {
     html = await fetchHtml(url, { acceptLanguage: "en-US,en;q=0.9", retries: 2 });
   } catch {
-    // Network/blocking failure: the page never loaded, but the chart often does.
+    // CamelCamelCamel is Cloudflare-protected; the page (and its chart CDN) are
+    // unreachable over plain HTTP. The caller falls back to local price tracking.
     return {
       asin,
       marketplace: code,
@@ -198,9 +199,9 @@ export async function getPriceHistory(
       highestDate: null,
       average: null,
       dropFromHighPct: null,
-      verdict: "Price history temporarily unavailable",
+      verdict: "CamelCamelCamel unavailable (Cloudflare-protected) — using local price history",
       source: "camelcamelcamel",
-      chartUrl,
+      chartUrl: null,
     };
   }
 
@@ -226,7 +227,7 @@ export async function getPriceHistory(
       chartUrl,
     };
   } catch {
-    // Page loaded but layout changed / Cloudflare challenge body: keep the chart.
+    // Page loaded but layout changed or returned a challenge body.
     return {
       asin,
       marketplace: code,
@@ -238,9 +239,9 @@ export async function getPriceHistory(
       highestDate: null,
       average: null,
       dropFromHighPct: null,
-      verdict: "Could not parse price history (page layout changed or blocked)",
+      verdict: "Could not parse CamelCamelCamel — using local price history",
       source: "camelcamelcamel",
-      chartUrl,
+      chartUrl: null,
     };
   }
 }

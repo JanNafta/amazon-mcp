@@ -25,6 +25,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "node scripts/e2e.mjs",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
