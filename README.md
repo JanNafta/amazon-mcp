@@ -1,5 +1,9 @@
 # amazon-mcp
 
+<p align="center">
+  <img src="assets/hero.png" alt="amazon-mcp — Amazon product search, price history and affiliate-tagged buy links inside Claude" width="100%">
+</p>
+
 An MCP server for Amazon: product search, price history (Camelizer-style), deals tracking, and affiliate-tagged purchase links.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -19,7 +23,17 @@ An MCP server for Amazon: product search, price history (Camelizer-style), deals
 - **Affiliate links, automatically** — your Amazon Associates tracking tag is injected into every product / buy link the server returns, so qualifying purchases earn you commission.
 - **12 marketplaces** — US, ES, UK, DE, FR, IT, CA, JP, MX, IN, BR, AU.
 
+## See it working
+
+<p align="center">
+  <img src="assets/demo.png" alt="Live output from search_products, get_buy_link, get_price_history (with price chart) and get_deals" width="100%">
+</p>
+
 ## How affiliate commission works
+
+<p align="center">
+  <img src="assets/affiliate.png" alt="How affiliate commission works: the MCP tags every buy link, Amazon drops a 24h cookie, and qualifying purchases credit your account" width="100%">
+</p>
 
 This server is built around the **standard Amazon Associates link-based attribution** model, which is the legitimate, documented way affiliates earn:
 
@@ -35,6 +49,12 @@ To actually earn, you must:
 > If you do not configure a tag, the server falls back to a built-in **placeholder tag** so that links still work — but **you earn nothing**. The placeholder is clearly flagged in every buy-link response.
 
 This is link-based attribution, the same mechanism behind any "as an Amazon Associate I earn from qualifying purchases" link. Nothing more.
+
+## Architecture
+
+<p align="center">
+  <img src="assets/architecture.png" alt="amazon-mcp architecture: Claude client over stdio JSON-RPC to the MCP server (9 tools + HTTP layer), reaching Amazon (live), CamelCamelCamel (best-effort) and a local SQLite store" width="100%">
+</p>
 
 ## Requirements
 
