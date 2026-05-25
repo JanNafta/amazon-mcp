@@ -1,0 +1,45 @@
+{
+  "name": "@jannafta/amazon-mcp",
+  "version": "0.1.0",
+  "description": "Amazon MCP server: product search, price history (Camelizer-style), deals tracking, and affiliate-tagged purchase links",
+  "keywords": ["mcp", "amazon", "affiliate", "price-tracker", "camelcamelcamel", "claude", "model-context-protocol"],
+  "license": "MIT",
+  "author": "Jan Nafta <jannafta@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JanNafta/amazon-mcp.git"
+  },
+  "homepage": "https://github.com/JanNafta/amazon-mcp#readme",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "amazon-mcp": "dist/index.js"
+  },
+  "files": ["dist", "README.md", "LICENSE", ".env.example"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "axios": "^1.7.9",
+    "better-sqlite3": "^11.7.0",
+    "cheerio": "^1.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
