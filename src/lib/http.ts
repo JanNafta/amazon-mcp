@@ -190,7 +190,9 @@ export function parsePrice(raw: string | null | undefined): number | null {
   if (!raw) return null;
 
   // Grab only the first number-like run so ranges don't get their two prices merged.
-  const token = raw.match(/[.,]?\d(?:[.,]|\d|[\s\u00a0\u202f](?=\d{3}(?!\d)))*\d|[.,]?\d/);
+  // Only true spaces (incl. NBSP) may join a run as thousands grouping — a newline
+  // or tab between two numbers means they are separate values.
+  const token = raw.match(/[.,]?\d(?:[.,]|\d|[ \u00a0\u202f](?=\d{3}(?!\d)))*\d|[.,]?\d/);
   if (!token) return null;
   const cleaned = token[0].replace(/[^\d.,]/g, "");
   if (!cleaned) return null;

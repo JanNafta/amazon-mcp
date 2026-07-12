@@ -270,9 +270,12 @@ Price history is **local-first**. Every time a product price is fetched (via `ge
 - *"Below average — good deal"*
 - *"Around the average price"*
 - *"Above average — consider waiting"*
-- *"Not enough history yet — look this product up a few more times to build a trend"*
+- *"The tracked price has held steady at … — no drop yet"* (local history exists but has never moved)
+- *"Not enough history yet — check this product again over the next few days to build a trend"*
 
-This means a product's trend **starts empty and grows as you use it**. To seed a baseline quickly, look a product up a few times (or add a price watch and refresh it with `checkNow`).
+Strong buy/wait calls are **gated by evidence**: they require CamelCamelCamel data or at least a few locally tracked points, so a first lookup never fabricates an "at the lowest price ever" claim from a single self-recorded data point. When both Amazon and CCC are unreachable, the reported price falls back to the newest local record and is labeled with its *last seen* date.
+
+This means a product's trend **starts empty and grows as you use it**. To seed a baseline quickly, look a product up over a few days (or add a price watch and refresh it with `checkNow`).
 
 The server also makes a **best-effort** attempt at **[CamelCamelCamel](https://camelcamelcamel.com/)** and merges its numbers when reachable — but CCC is Cloudflare-protected and usually unavailable over plain HTTP (see [Limitations](#limitations)). The same SQLite database backs the response cache and stored price watches.
 

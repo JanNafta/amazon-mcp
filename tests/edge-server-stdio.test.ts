@@ -68,9 +68,9 @@ function isErr(resp: RpcResponse): boolean {
 }
 
 beforeAll(async () => {
-  if (!existsSync(SERVER)) {
-    execSync("npm run build", { cwd: ROOT, stdio: "inherit", timeout: 120_000 });
-  }
+  // Always rebuild: dist/ is gitignored and can lag behind src, and a stale build
+  // would make this integration test silently validate old code.
+  execSync("npm run build", { cwd: ROOT, stdio: "inherit", timeout: 120_000 });
 
   child = spawn("node", [SERVER], {
     cwd: ROOT,

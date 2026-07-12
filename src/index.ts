@@ -50,9 +50,10 @@ import { z } from "zod";
 
 import { loadConfig, MARKETPLACES } from "./config.js";
 import type { MarketplaceCode, PriceHistory } from "./types.js";
-import { buildBuyLink } from "./lib/affiliate.js";
+import { buildBuyLink, resolveAssociateTag, tagMatchesMarketplace } from "./lib/affiliate.js";
 import { searchProducts, getProductDetails } from "./lib/amazon-scraper.js";
 import { getPriceHistory } from "./lib/camelcamelcamel.js";
+import { analyzePriceHistory } from "./lib/price-analysis.js";
 import { getTodaysDeals } from "./lib/deals.js";
 import {
   getOrFetch,
@@ -96,6 +97,23 @@ function clip(s: string, max: number): string {
   return cps.length > max ? `${cps.slice(0, max - 1).join("")}…` : trimmed;
 }
 
+/**
+ * One-line footer for tool outputs that embed affiliate links, warning when those
+ * links won't actually earn commission (no/invalid tag, or a tag from another
+ * marketplace's per-country program). Empty string when the tag is fine — the same
+ * honesty get_buy_link already has, applied to every link-emitting tool.
+ */
+function affiliateNote(code: MarketplaceCode): string {
+  const tag = resolveAssociateTag(code);
+  if (!tag) {
+    return `\n\nNote: links are untagged (no valid Associates tag configured for ${code}) — they work but earn no commission. Set AMAZON_ASSOCIATE_TAG_${code} or AMAZON_ASSOCIATE_TAG.`;
+  }
+  if (tagMatchesMarketplace(tag, code) === false) {
+    return `\n\nNote: tag "${tag}" doesn't match Amazon ${code}'s Associates program (expected suffix -${MARKETPLACES[code].tagSuffix}) — these links likely earn NO commission on ${code}. Set AMAZON_ASSOCIATE_TAG_${code}.`;
+  }
+  return "";
+}
+
 function text(t: string) {
   return { content: [{ type: "text" as const, text: t }] };
 }
@@ -136,7 +154,7 @@ server.registerTool(
         const rating = p.rating != null ? `★${p.rating}${p.reviewCount != null ? ` (${p.reviewCount.toLocaleString()})` : ""}` : "";
         return `${i + 1}. ${clip(p.title, 180)}\n   ${money(p.price, p.currency)}  ${rating}  ${p.isPrime ? "✓Prime" : ""}\n   ASIN: ${p.asin}\n   Buy (affiliate): ${p.affiliateUrl}`;
       });
-      return text(`Top ${results.length} results for "${query}" on Amazon ${code}:\n\n${lines.join("\n\n")}`);
+      return text(`Top ${results.length} results for "${query}" on Amazon ${code}:\n\n${lines.join("\n\n")}` + affiliateNote(code));
     } catch (e) {
       return errorText(`Search failed on Amazon ${code}: ${(e as Error).message}`);
     }
@@ -177,7 +195,8 @@ server.registerTool(
           `${p.availability ? `Availability: ${clip(p.availability, 120)}\n` : ""}` +
           `ASIN: ${p.asin} · Marketplace: ${code}${crumbs}\n` +
           `Buy (affiliate): ${p.affiliateUrl}` +
-          feat,
+          feat +
+          affiliateNote(code),
       );
     } catch (e) {
       return errorText(`Could not fetch product ${a} on Amazon ${code}: ${(e as Error).message}`);
@@ -217,67 +236,47 @@ server.registerTool(
       /* product page blocked — fall back to whatever history exists */
     }
 
-    // 2) Best-effort CamelCamelCamel (usually Cloudflare-blocked; treated as bonus data).
+    // 2) Best-effort CamelCamelCamel (usually Cloudflare-blocked; treated as bonus
+    // data). A degraded all-null result is a FAILURE, not data — don't cache it for
+    // 6h as if it were a success; let the next call retry.
     let ccc: PriceHistory | null = null;
     try {
-      ccc = await getOrFetch(`pricehist:${code}:${a}`, config.cacheTtlPriceHistory, () => getPriceHistory(a, code));
+      ccc = await getOrFetch(
+        `pricehist:${code}:${a}`,
+        config.cacheTtlPriceHistory,
+        () => getPriceHistory(a, code),
+        (h) => h.current != null || h.lowest != null || h.highest != null,
+      );
       if (ccc && ccc.current == null && ccc.lowest == null && ccc.highest == null) ccc = null;
     } catch {
       ccc = null;
     }
 
-    // 3) Local history (source of truth here).
+    // 3) Local history + merge + verdict (pure logic in lib/price-analysis.ts).
     const log = getPriceLog(a, code, 1000);
-    const prices = log.map((p) => p.price);
-    const round2 = (n: number) => Math.round(n * 100) / 100;
-    const localLowest = prices.length ? Math.min(...prices) : null;
-    const localHighest = prices.length ? Math.max(...prices) : null;
-    const localAvg = prices.length ? round2(prices.reduce((x, y) => x + y, 0) / prices.length) : null;
+    const analysis = analyzePriceHistory({
+      livePrice: currentPrice,
+      ccc,
+      log,
+      formatMoney: (n) => money(n, currency),
+    });
+    const { current, currentAsOf, lowest, highest, average, dropFromHighPct, verdict, source } = analysis;
 
-    // 4) Merge: prefer CCC where it has data, else local.
-    const current = currentPrice ?? ccc?.current ?? log[0]?.price ?? null;
-    const lowest = ccc?.lowest ?? localLowest;
-    const highest = ccc?.highest ?? localHighest;
-    const average = ccc?.average ?? localAvg;
-    const source = ccc ? "camelcamelcamel + local" : "local price tracking";
-    const dropFromHigh = current != null && highest != null && highest > 0 ? Math.round((1 - current / highest) * 1000) / 10 : null;
-
-    // Only make a strong buy/wait call when there's enough evidence: real CCC data,
-    // or enough recorded local points. Gate on the number of POINTS (not distinct
-    // values) — logPrice de-dups same-day/same-price, so a stable product still
-    // accumulates ~1 point per day and eventually clears the bar.
-    const points = prices.length;
-    const distinctPrices = new Set(prices).size;
-    const hasSupport = ccc != null || points >= 4;
-    // Local-only history that has never moved: report stability rather than a made-up
-    // buy/wait call (with one flat value, current == lowest == average trivially).
-    const flatLocalOnly = ccc == null && distinctPrices <= 1;
-
-    let verdict: string;
-    if (current == null) verdict = "Current price unknown (Amazon page blocked or unavailable).";
-    else if (!hasSupport)
-      verdict = "Not enough history yet — check this product again over the next few days to build a trend.";
-    else if (flatLocalOnly)
-      verdict = `The tracked price has held steady at ${money(current, currency)} over ${points} checks — no drop yet.`;
-    else if (lowest != null && current <= lowest * 1.01) verdict = "At or near the lowest tracked price — great time to buy.";
-    else if (average != null && current < average * 0.9) verdict = "Below average — good deal.";
-    else if (average != null && current > average * 1.1) verdict = "Above average — consider waiting.";
-    else if (average != null) verdict = "Around the average price.";
-    else verdict = "Not enough history yet — check this product again over the next few days to build a trend.";
-
-    const drop = dropFromHigh != null ? `${dropFromHigh}% below tracked high` : "—";
+    const drop = dropFromHighPct != null ? `${dropFromHighPct}% below tracked high` : "\u2014";
     const recent = log.slice(0, 6);
     const recentStr = recent.length
-      ? `\n\nTracked prices (${prices.length} point${prices.length === 1 ? "" : "s"}):\n${recent
+      ? `\n\nTracked prices (${log.length} point${log.length === 1 ? "" : "s"}):\n${recent
           .map((p) => `  ${p.date.slice(0, 10)}: ${money(p.price, currency)}`)
           .join("\n")}`
       : "";
 
     const chartStr = ccc?.chartUrl ? `\nChart:   ${ccc.chartUrl}` : "";
+    // When "current" is really "last seen" (both Amazon and CCC unavailable), say so.
+    const currentLabel = currentAsOf ? `${money(current, currency)} (last seen ${currentAsOf})` : money(current, currency);
 
     return text(
       `Price history for ${a} (Amazon ${code}) — ${verdict}\n\n` +
-        `Current: ${money(current, currency)}\n` +
+        `Current: ${currentLabel}\n` +
         `Lowest:  ${money(lowest, currency)}\n` +
         `Highest: ${money(highest, currency)}\n` +
         `Average: ${money(average, currency)}\n` +
@@ -307,7 +306,7 @@ server.registerTool(
   async ({ category, minDiscountPct, marketplace, limit }) => {
     const code = mp(marketplace);
     try {
-      const key = `deals:${code}:${(category ?? "all").trim().toLowerCase()}:${minDiscountPct ?? 0}:${limit ?? 20}`;
+      const key = `deals:${code}:${category ? category.trim().toLowerCase() : "\u0000none"}:${minDiscountPct ?? 0}:${limit ?? 20}`;
       const deals = await getOrFetch(
         key,
         config.cacheTtlDeals,
@@ -321,7 +320,7 @@ server.registerTool(
         const was = d.listPrice != null ? ` was ${money(d.listPrice, d.currency)}` : "";
         return `${i + 1}. ${clip(d.title, 180)}\n   ${money(d.dealPrice, d.currency)}${disc}${was}\n   Buy (affiliate): ${d.affiliateUrl}`;
       });
-      return text(`${deals.length} deals on Amazon ${code}${category ? ` for "${category}"` : ""}:\n\n${lines.join("\n\n")}`);
+      return text(`${deals.length} deals on Amazon ${code}${category ? ` for "${category}"` : ""}:\n\n${lines.join("\n\n")}` + affiliateNote(code));
     } catch (e) {
       return errorText(`Could not fetch deals on Amazon ${code}: ${(e as Error).message}`);
     }
@@ -397,7 +396,8 @@ server.registerTool(
         rows.push(`${c}: not available (${(r.reason as Error)?.message ?? "lookup failed"})`);
       }
     });
-    return text(`Price comparison for ${a}:\n\n${rows.join("\n\n")}`);
+    const notes = [...new Set(codes.map((c) => affiliateNote(c)).filter(Boolean))].join("");
+    return text(`Price comparison for ${a}:\n\n${rows.join("\n\n")}` + notes);
   },
 );
 
@@ -439,19 +439,27 @@ server.registerTool(
     if (watches.length === 0) return text("No price watches saved. Use add_price_watch to create one.");
 
     // When re-checking, fetch all watched products concurrently (bounded) so N watches
-    // don't take N × the single-lookup latency.
+    // don't take N × the single-lookup latency. Track failures per watch — a blocked
+    // re-check must be visible, not silently rendered as a fresh "now" price.
     const refreshed = new Map<number, number>();
+    const failed = new Set<number>();
     if (checkNow) {
       const CONCURRENCY = 4;
       for (let i = 0; i < watches.length; i += CONCURRENCY) {
         const batch = watches.slice(i, i + CONCURRENCY);
         await Promise.allSettled(
           batch.map(async (w) => {
-            const p = await getProductDetails(w.asin, w.marketplace);
-            if (p.price != null) {
-              logPrice(w.asin, w.marketplace, p.price);
-              updateWatchPrice(w.id, p.price);
-              refreshed.set(w.id, p.price);
+            try {
+              const p = await getProductDetails(w.asin, w.marketplace);
+              if (p.price != null) {
+                logPrice(w.asin, w.marketplace, p.price);
+                updateWatchPrice(w.id, p.price);
+                refreshed.set(w.id, p.price);
+              } else {
+                failed.add(w.id);
+              }
+            } catch {
+              failed.add(w.id);
             }
           }),
         );
@@ -463,9 +471,12 @@ server.registerTool(
       const current = refreshed.has(w.id) ? refreshed.get(w.id)! : w.lastPrice;
       // Derive "target met" from the actual current price, never a stale latched flag.
       const hit = current != null && current <= w.targetPrice;
-      return `#${w.id} ${w.asin} (${w.marketplace}) target ≤ ${money(w.targetPrice, cur)} · now ${money(current, cur)} ${hit ? "✅ TARGET MET" : "⏳"}`;
+      const stale = failed.has(w.id) ? " (re-check failed — showing last known price)" : "";
+      return `#${w.id} ${w.asin} (${w.marketplace}) target ≤ ${money(w.targetPrice, cur)} · now ${money(current, cur)} ${hit ? "✅ TARGET MET" : "⏳"}${stale}`;
     });
-    return text(`Price watches:\n\n${lines.join("\n")}`);
+    const failNote =
+      checkNow && failed.size > 0 ? `\n\n⚠ ${failed.size} of ${watches.length} re-checks failed (Amazon blocked or product unavailable).` : "";
+    return text(`Price watches:\n\n${lines.join("\n")}${failNote}`);
   },
 );
 

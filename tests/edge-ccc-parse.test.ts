@@ -26,11 +26,13 @@ beforeEach(() => {
 });
 
 describe("getPriceHistory — degraded contract for marketplaces without a CCC host (no network)", () => {
+  // JP is here on purpose: jp.camelcamelcamel.com does not exist (NXDOMAIN), so JP
+  // degrades without a fetch. AU moved OUT of this list — au.camelcamelcamel.com is real.
   const unsupported: Array<[MarketplaceCode, string]> = [
     ["MX", "MXN"],
     ["IN", "INR"],
     ["BR", "BRL"],
-    ["AU", "AUD"],
+    ["JP", "JPY"],
   ];
 
   it.each(unsupported)(
@@ -89,7 +91,7 @@ describe("getPriceHistory — host/country mapping", () => {
 });
 
 describe("getPriceHistory — never throws, always a well-formed PriceHistory", () => {
-  it("degrades when fetchHtml rejects (Cloudflare) with a null chartUrl", async () => {
+  it("degrades when fetchHtml rejects (Cloudflare) but KEEPS the chart URL (buildable without a fetch)", async () => {
     fetchHtmlMock.mockRejectedValueOnce(new Error("403 challenge"));
 
     const result = await getPriceHistory("B08N5WRWNW", "UK");
@@ -101,7 +103,7 @@ describe("getPriceHistory — never throws, always a well-formed PriceHistory", 
     expect(result.highest).toBeNull();
     expect(result.average).toBeNull();
     expect(result.dropFromHighPct).toBeNull();
-    expect(result.chartUrl).toBeNull();
+    expect(result.chartUrl).toContain("/uk/B08N5WRWNW/amazon.png");
     expect(result.verdict).toBe(
       "CamelCamelCamel unavailable (Cloudflare-protected) — using local price history",
     );
@@ -157,10 +159,9 @@ describe("getPriceHistory — price-table parsing edge cases", () => {
 
     const result = await getPriceHistory("B0DATENORM", "US");
 
-    // new Date("Dec 24, 2024") is local-midnight, so the ISO date can be the
-    // 23rd or 24th depending on the runner's timezone; only the format and
-    // month are timezone-stable.
-    expect(result.lowestDate).toMatch(/^2024-12-2[34]$/);
+    // normalizeDate formats from LOCAL date components (not toISOString), so
+    // "Dec 24, 2024" is 2024-12-24 in EVERY timezone — no off-by-one drift.
+    expect(result.lowestDate).toBe("2024-12-24");
   });
 
   it("skips a '3rd Party' seller cell when locating price and date cells", async () => {

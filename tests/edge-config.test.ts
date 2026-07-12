@@ -1,6 +1,20 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadConfig, resolveMarketplace } from "../src/config.js";
+
+// Pin every config-relevant var to "" so values exported by the developer's shell
+// (e.g. a real AMAZON_CACHE_TTL_PRODUCT) can't leak in and flip the default tests.
+beforeEach(() => {
+  for (const v of [
+    "AMAZON_CACHE_TTL_PRODUCT",
+    "AMAZON_CACHE_TTL_PRICE_HISTORY",
+    "AMAZON_CACHE_TTL_DEALS",
+    "AMAZON_DEFAULT_MARKETPLACE",
+    "AMAZON_CACHE_DB_PATH",
+  ]) {
+    vi.stubEnv(v, "");
+  }
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();

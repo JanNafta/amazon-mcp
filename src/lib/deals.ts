@@ -147,7 +147,11 @@ function parseDeals(html: string, host: string, currency: string, code: Marketpl
     // Drop cards missing an asin or title.
     if (!asin || !title) return;
 
-    const dealPrice = parsePrice(scopedFirstText($card, [".a-price .a-offscreen"]));
+    // :not(.a-text-price) so a struck-through list price rendered before the deal
+    // price is never read as the deal price itself.
+    const dealPrice = parsePrice(
+      scopedFirstText($card, [".a-price:not(.a-text-price) .a-offscreen", ".a-price .a-offscreen"]),
+    );
     const listPrice = parsePrice(
       scopedFirstText($card, [".a-price.a-text-price .a-offscreen", '[data-a-strike="true"] .a-offscreen']),
     );

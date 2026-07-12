@@ -139,10 +139,16 @@ export function cacheGet<T>(key: string): T | null {
 }
 
 export function cacheSet<T>(key: string, value: T, ttlSeconds: number): void {
-  const expiresAt = nowEpochSeconds() + ttlSeconds;
-  getDb()
-    .prepare("INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)")
-    .run(key, JSON.stringify(value), expiresAt);
+  const now = nowEpochSeconds();
+  const conn = getDb();
+  // Opportunistic garbage collection: expired rows are otherwise only deleted when
+  // their exact key is read again, so the table would grow without bound.
+  conn.prepare("DELETE FROM cache WHERE expires_at < ?").run(now);
+  conn.prepare("INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)").run(
+    key,
+    JSON.stringify(value),
+    now + ttlSeconds,
+  );
 }
 
 export async function getOrFetch<T>(

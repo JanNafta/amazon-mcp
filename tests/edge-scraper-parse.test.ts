@@ -136,6 +136,40 @@ describe("review count parsing (indirect, via search result cards)", () => {
     expect(await countFor(`<span class="a-size-base s-underline-text">12 345</span>`)).toBe(12345);
   });
 
+  it("expands the Japanese 万 abbreviation: '(1.6万)' → 16000 (live-confirmed amazon.co.jp format)", async () => {
+    // Regression: this used to strip the dot and return 16 — a silent ~1000x
+    // corruption for every popular JP product (visible count is rendered as N.N万).
+    expect(await countFor(`<span class="a-size-base s-underline-text">(1.6万)</span>`, "JP")).toBe(16000);
+    expect(await countFor(`<span class="a-size-base s-underline-text">(1.2万)</span>`, "JP")).toBe(12000);
+  });
+
+  it("expands the Japanese 千 abbreviation: '3千' → 3000", async () => {
+    expect(await countFor(`<span class="a-size-base s-underline-text">3千</span>`, "JP")).toBe(3000);
+  });
+
+  it("expands the German Mio. abbreviation: '1,2 Mio.' → 1200000", async () => {
+    expect(await countFor(`<span class="a-size-base s-underline-text">1,2 Mio.</span>`, "DE")).toBe(1_200_000);
+  });
+
+  it("returns null (not a fabricated count) for a rating-only aria-label", async () => {
+    // Regression: when the underline span is missing, the fallback selector can catch
+    // the star-popover anchor ("4.2 out of 5 stars, rating details") — that must not
+    // fabricate reviewCount=5 from the "out of 5".
+    expect(
+      await countFor(`<a href="#customerReviews" aria-label="4.2 out of 5 stars, rating details"></a>`),
+    ).toBeNull();
+  });
+
+  it("returns null for a Japanese rating-only aria-label: '5つ星のうち4.2'", async () => {
+    expect(await countFor(`<a href="#customerReviews" aria-label="5つ星のうち4.2"></a>`, "JP")).toBeNull();
+  });
+
+  it("takes the count even when it comes BEFORE the rating: '1,234 ratings, 4.2 stars' → 1234", async () => {
+    expect(
+      await countFor(`<a href="#customerReviews" aria-label="1,234 ratings, 4.2 stars"></a>`),
+    ).toBe(1234);
+  });
+
   it("reads the count from the aria-label anchor fallback when no underline text exists", async () => {
     expect(await countFor(`<a href="#customerReviews" aria-label="1,234 ratings"></a>`)).toBe(1234);
   });

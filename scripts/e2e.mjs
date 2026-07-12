@@ -144,8 +144,8 @@ async function main() {
   const asinMatch = usText.match(/ASIN: ([A-Z0-9]{10})/);
   const liveAsin = asinMatch ? asinMatch[1] : "B08N5WRWNW";
   check("capture live ASIN for downstream", r, () => ({
-    ok: !!asinMatch || true, msg: `using ASIN ${liveAsin}${asinMatch ? " (live)" : " (fallback)"}`,
-  }), "an ASIN");
+    ok: !!asinMatch, msg: `using ASIN ${liveAsin}${asinMatch ? " (live)" : " (fallback)"}`,
+  }), "a live ASIN in the search output");
   await sleep(DELAY);
 
   // get_product
@@ -180,12 +180,15 @@ async function main() {
   }), "deals or clean empty");
   await sleep(DELAY);
 
-  // compare_marketplaces
+  // compare_marketplaces — require at least one row with a real price, not just the
+  // row labels (which render even when every lookup fails).
   r = await call("compare_marketplaces", { asin: liveAsin, marketplaces: ["US", "UK", "DE"] });
-  check("compare_marketplaces: 3 rows", r, (_r, t) => ({
-    ok: /US:/.test(t) && /UK:/.test(t) && /DE:/.test(t),
-    msg: t.replace(/\n+/g, " ").slice(0, 110),
-  }), "US/UK/DE rows");
+  check("compare_marketplaces: 3 rows + ≥1 real price", r, (_r, t) => {
+    const rows = /US:/.test(t) && /UK:/.test(t) && /DE:/.test(t);
+    const anyPrice = /(US|UK|DE): \d/.test(t);
+    if (rows && !anyPrice && looksBlocked(t)) return { ok: false, msg: "all rows blocked" }; // -> BLOCKED via outer check
+    return { ok: rows && anyPrice, msg: t.replace(/\n+/g, " ").slice(0, 110) };
+  }, "US/UK/DE rows with at least one price");
   await sleep(DELAY);
 
   console.log("\n── OFFLINE: watches + cache ──");
