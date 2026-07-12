@@ -13,6 +13,9 @@ const env = {
   AMAZON_ASSOCIATE_TAG_ES: "jantest-21",
   AMAZON_ASSOCIATE_TAG_UK: "jantest-21",
   AMAZON_ASSOCIATE_TAG_DE: "jantest-21",
+  // Pin the generic tag to empty so the run never picks up the developer's real
+  // AMAZON_ASSOCIATE_TAG from a local .env (defined ⇒ the .env loader won't override it).
+  AMAZON_ASSOCIATE_TAG: "",
   AMAZON_DEFAULT_MARKETPLACE: "US",
   // isolate the cache DB so the run is reproducible
   AMAZON_CACHE_DB_PATH: "/tmp/amazon-mcp-e2e-cache.db",
