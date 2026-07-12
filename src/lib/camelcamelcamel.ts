@@ -22,7 +22,7 @@ const CCC_HOSTS: Partial<Record<MarketplaceCode, string>> = {
   FR: "fr.camelcamelcamel.com",
   IT: "it.camelcamelcamel.com",
   ES: "es.camelcamelcamel.com",
-  CA: "camelcamelcamel.com",
+  CA: "ca.camelcamelcamel.com",
   JP: "jp.camelcamelcamel.com",
 };
 
@@ -35,7 +35,7 @@ const CCC_COUNTRY: Partial<Record<MarketplaceCode, string>> = {
   IT: "it",
   ES: "es",
   JP: "jp",
-  CA: "us",
+  CA: "ca",
 };
 
 interface ParsedRow {
@@ -70,9 +70,22 @@ function normalizeDate(raw: string | null | undefined): string | null {
   return d.toISOString().slice(0, 10);
 }
 
-/** True when a table cell's text carries a price (currency symbol or digits). */
+/**
+ * True when a cell carries a price: a currency symbol (incl. full-width ￥ U+FFE5 and
+ * 円 used on Amazon JP), or a number with 2-decimal cents. JPY/INR have no cents, so the
+ * symbol check is what catches them (e.g. "￥4,988").
+ */
 function looksLikePrice(text: string): boolean {
-  return /[\d$£€¥]/.test(text);
+  return /[$£€¥￥₹円]/.test(text) || /\d[\d.,\s]*[.,]\d{2}(?!\d)/.test(text);
+}
+
+/** True when a cell looks like a date (month name or a slash/dash date or a bare year). */
+function looksLikeDate(text: string): boolean {
+  return (
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(text) ||
+    /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/.test(text) ||
+    /\b(19|20)\d{2}\b/.test(text)
+  );
 }
 
 /**
@@ -105,9 +118,9 @@ function parsePriceTable($: cheerio.CheerioAPI): ParsedRow {
     const priceCell = cellTexts.slice(1).find((t) => looksLikePrice(t)) ?? null;
     const price = priceCell ? parsePrice(priceCell) : null;
 
-    // Date cell: a later cell that does not itself look like a price.
-    const dateCell =
-      cellTexts.slice(1).find((t) => t.length > 0 && !looksLikePrice(t)) ?? null;
+    // Date cell: a later cell that looks like a date (not merely "not a price" — a
+    // "3rd Party" seller cell has no digits but isn't a date either).
+    const dateCell = cellTexts.slice(1).find((t) => looksLikeDate(t)) ?? null;
     const date = normalizeDate(dateCell);
 
     if ((label.includes("current") || label.includes("amazon")) && !sawCurrent) {

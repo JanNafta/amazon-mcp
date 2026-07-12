@@ -57,6 +57,15 @@ function isWafChallenge(html: string): boolean {
   return html.length < 20000 && /awsWafCookieDomainList|gokuProps|aws-waf-token|captcha\.awswaf|AwsWafIntegration/i.test(html);
 }
 
+/** Host of a URL, or "" when it can't be parsed. Used to keep hops/cookies same-origin. */
+function safeHost(u: string): string {
+  try {
+    return new URL(u).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 /** Accumulate Set-Cookie values into a Cookie header string across challenge hops. */
 function mergeCookies(prev: string, setCookie: string[] | undefined): string {
   if (!setCookie || setCookie.length === 0) return prev;
@@ -89,8 +98,13 @@ export async function fetchHtml(url: string, opts: FetchOptions = {}): Promise<s
     try {
       let currentUrl = url;
       let body = "";
+      const originHost = safeHost(url);
 
       for (let hop = 0; hop <= 2; hop++) {
+        // Only ever send accumulated cookies back to the origin host. A meta-refresh
+        // challenge could point at a different host; forwarding the jar there would
+        // leak session/WAF cookies cross-origin (and act as an SSRF credential relay).
+        const sameOrigin = safeHost(currentUrl) === originHost;
         const config: AxiosRequestConfig = {
           timeout: timeoutMs,
           maxRedirects: 5,
@@ -108,14 +122,17 @@ export async function fetchHtml(url: string, opts: FetchOptions = {}): Promise<s
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": hop === 0 ? "none" : "same-origin",
             "Upgrade-Insecure-Requests": "1",
-            ...(cookies ? { Cookie: cookies } : {}),
+            ...(cookies && sameOrigin ? { Cookie: cookies } : {}),
             ...headers,
           },
         };
 
         const res = await axios.get<string>(currentUrl, config);
         body = res.data ?? "";
-        cookies = mergeCookies(cookies, res.headers?.["set-cookie"] as string[] | undefined);
+        // Only remember cookies set by the origin host.
+        if (sameOrigin) {
+          cookies = mergeCookies(cookies, res.headers?.["set-cookie"] as string[] | undefined);
+        }
 
         if (res.status === 429 || res.status === 503) {
           throw new Error(`Rate limited (HTTP ${res.status})`);
@@ -131,7 +148,9 @@ export async function fetchHtml(url: string, opts: FetchOptions = {}): Promise<s
         }
 
         const next = extractMetaRefresh(body, currentUrl);
-        if (next && hop < 2) {
+        // Never follow a challenge hop that leaves the origin host — a compromised
+        // or hostile page must not be able to redirect our scraper elsewhere.
+        if (next && safeHost(next) === originHost && hop < 2) {
           await sleep(1200 + Math.random() * 800);
           currentUrl = next;
           continue;
@@ -156,24 +175,47 @@ export async function fetchHtml(url: string, opts: FetchOptions = {}): Promise<s
   throw new Error(`fetchHtml failed for ${url}: ${(lastErr as Error)?.message ?? lastErr}`);
 }
 
-/** Parse a localized price string into a number. Handles "1.234,56 €", "$1,234.56", "£12.99", "12,99". */
+/**
+ * Parse a localized price string into a number. Handles US ("$1,234.56"), EU
+ * ("1.234,56 €", "12,99"), grouped integers with no decimals ("$1,234" → 1234,
+ * "￥4,988" → 4988), the Indian lakh grouping ("₹1,29,900" → 129900) and price
+ * ranges (returns the first price, so "10,99 € - 24,99 €" → 10.99).
+ *
+ * The separator ambiguity (is "1,234" a thousands group or a decimal?) is resolved
+ * by the size of the trailing group: 1–2 trailing digits = decimals, 3 = a thousands
+ * group. This matches how Amazon renders prices everywhere (it never shows a bare
+ * 3-decimal price), so JPY/INR — which have no decimals — parse correctly.
+ */
 export function parsePrice(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  const cleaned = raw.replace(/[^\d.,]/g, "").trim();
+
+  // Grab only the first number-like run so ranges don't get their two prices merged.
+  const token = raw.match(/[.,]?\d(?:[.,]|\d|[\s\u00a0\u202f](?=\d{3}(?!\d)))*\d|[.,]?\d/);
+  if (!token) return null;
+  const cleaned = token[0].replace(/[^\d.,]/g, "");
   if (!cleaned) return null;
 
   const lastComma = cleaned.lastIndexOf(",");
   const lastDot = cleaned.lastIndexOf(".");
-  let normalized: string;
 
-  if (lastComma > lastDot) {
-    // Comma is the decimal separator (EU): 1.234,56 -> 1234.56
-    normalized = cleaned.replace(/\./g, "").replace(",", ".");
-  } else if (lastDot > lastComma) {
-    // Dot is the decimal separator (US): 1,234.56 -> 1234.56
-    normalized = cleaned.replace(/,/g, "");
+  let normalized: string;
+  if (lastComma === -1 && lastDot === -1) {
+    normalized = cleaned;
   } else {
-    normalized = cleaned.replace(/,/g, "");
+    const lastSep = Math.max(lastComma, lastDot);
+    const trailingDigits = cleaned.length - lastSep - 1;
+    const hasBothSeparators = lastComma !== -1 && lastDot !== -1;
+    // The last separator is a decimal point when both separator kinds appear (the
+    // other is then grouping) or when it is followed by 1–2 digits. A lone separator
+    // followed by exactly 3 digits is a thousands group, not a decimal.
+    const decimalSeparator = hasBothSeparators || (trailingDigits >= 1 && trailingDigits <= 2);
+    if (decimalSeparator) {
+      const intPart = cleaned.slice(0, lastSep).replace(/[.,]/g, "");
+      const fracPart = cleaned.slice(lastSep + 1);
+      normalized = `${intPart || "0"}.${fracPart}`;
+    } else {
+      normalized = cleaned.replace(/[.,]/g, "");
+    }
   }
 
   const n = parseFloat(normalized);

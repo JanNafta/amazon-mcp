@@ -1,14 +1,15 @@
 // SQLite-backed cache, price watches, and local price log for the Amazon MCP server.
 
-import Database from "better-sqlite3";
+import type DatabaseType from "better-sqlite3";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
+import { createRequire } from "node:module";
 
 import { loadConfig } from "../config.js";
 import type { MarketplaceCode, PriceWatch } from "../types.js";
 
-let db: Database.Database | null = null;
+let db: DatabaseType.Database | null = null;
 
 function resolveDbPath(): string {
   const configured = loadConfig().cacheDbPath;
@@ -18,9 +19,23 @@ function resolveDbPath(): string {
   return join(homedir(), ".amazon-mcp", "cache.db");
 }
 
-function getDb(): Database.Database {
+function getDb(): DatabaseType.Database {
   if (db) {
     return db;
+  }
+
+  // Load the native module lazily so an ABI/binding mismatch surfaces as an
+  // actionable error on first cache use instead of crashing the whole MCP server
+  // at import time (which would kill even the offline, network-free tools).
+  let Database: typeof DatabaseType;
+  try {
+    const require = createRequire(import.meta.url);
+    Database = require("better-sqlite3") as typeof DatabaseType;
+  } catch (e) {
+    throw new Error(
+      `Failed to load better-sqlite3 (native binding). Run \`npm rebuild better-sqlite3\` ` +
+        `for your current Node version. Original error: ${(e as Error).message}`,
+    );
   }
 
   const dbPath = resolveDbPath();
@@ -133,15 +148,31 @@ export function cacheSet<T>(key: string, value: T, ttlSeconds: number): void {
 export async function getOrFetch<T>(
   key: string,
   ttlSeconds: number,
-  fetcher: () => Promise<T>
+  fetcher: () => Promise<T>,
+  /**
+   * Guard against caching failure-shaped values (empty arrays, all-null objects)
+   * as if they were successes. Return false to skip writing this value to the cache
+   * so the next call retries instead of serving a stale failure. Defaults to caching
+   * everything.
+   */
+  shouldCache: (value: T) => boolean = () => true,
 ): Promise<T> {
   const cached = cacheGet<T>(key);
   if (cached !== null) {
     return cached;
   }
   const fresh = await fetcher();
-  cacheSet(key, fresh, ttlSeconds);
+  if (shouldCache(fresh)) {
+    cacheSet(key, fresh, ttlSeconds);
+  }
   return fresh;
+}
+
+/** True when a value looks like a real result worth caching (non-empty array / non-null). */
+export function isNonEmpty<T>(value: T): boolean {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
 // --- Price watches ---------------------------------------------------------
@@ -152,11 +183,20 @@ export function addWatch(
   targetPrice: number
 ): PriceWatch {
   const createdAt = new Date().toISOString();
-  getDb()
+  const info = getDb()
     .prepare(
       "INSERT OR IGNORE INTO watches (asin, marketplace, target_price, created_at, triggered) VALUES (?, ?, ?, ?, 0)"
     )
     .run(asin, marketplace, targetPrice, createdAt);
+  // Re-adding an identical watch should re-arm it, not silently return a stale row
+  // still flagged as triggered from a previous run.
+  if (info.changes === 0) {
+    getDb()
+      .prepare(
+        "UPDATE watches SET triggered = 0 WHERE asin = ? AND marketplace = ? AND target_price = ?"
+      )
+      .run(asin, marketplace, targetPrice);
+  }
 
   const row = getDb()
     .prepare(
@@ -180,9 +220,12 @@ export function removeWatch(id: number): boolean {
 }
 
 export function updateWatchPrice(id: number, lastPrice: number): void {
+  // Re-evaluate `triggered` from the current price every time (not a one-way latch):
+  // if the price rises back above the target, the watch un-triggers so the next
+  // genuine drop is reported honestly.
   getDb()
     .prepare(
-      "UPDATE watches SET last_price = ?, triggered = CASE WHEN ? <= target_price THEN 1 ELSE triggered END WHERE id = ?"
+      "UPDATE watches SET last_price = ?, triggered = CASE WHEN ? <= target_price THEN 1 ELSE 0 END WHERE id = ?"
     )
     .run(lastPrice, lastPrice, id);
 }
@@ -195,6 +238,19 @@ export function logPrice(
   price: number
 ): void {
   const scrapedAt = new Date().toISOString();
+  // De-dup: skip if the newest logged price for this ASIN/marketplace is already
+  // this exact value on the same calendar day. Prevents repeated same-price lookups
+  // from flooding the log and biasing the local average.
+  // Tie-break by id (insertion order): scraped_at has millisecond precision, so two
+  // inserts in the same ms would otherwise make "the latest row" ambiguous.
+  const latest = getDb()
+    .prepare(
+      "SELECT price, scraped_at FROM prices_log WHERE asin = ? AND marketplace = ? ORDER BY scraped_at DESC, id DESC LIMIT 1"
+    )
+    .get(asin, marketplace) as { price: number; scraped_at: string } | undefined;
+  if (latest && latest.price === price && latest.scraped_at.slice(0, 10) === scrapedAt.slice(0, 10)) {
+    return;
+  }
   getDb()
     .prepare(
       "INSERT INTO prices_log (asin, marketplace, price, scraped_at) VALUES (?, ?, ?, ?)"
@@ -209,7 +265,7 @@ export function getPriceLog(
 ): { date: string; price: number }[] {
   const rows = getDb()
     .prepare(
-      "SELECT scraped_at AS date, price FROM prices_log WHERE asin = ? AND marketplace = ? ORDER BY scraped_at DESC LIMIT ?"
+      "SELECT scraped_at AS date, price FROM prices_log WHERE asin = ? AND marketplace = ? ORDER BY scraped_at DESC, id DESC LIMIT ?"
     )
     .all(asin, marketplace, limit) as PriceLogRow[];
   return rows.map((row) => ({ date: row.date, price: row.price }));

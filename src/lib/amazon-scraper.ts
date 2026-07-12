@@ -29,22 +29,43 @@ function firstAttr($: CheerioAPI, selectors: string[], attr: string): string | n
   return null;
 }
 
-/** Pull the first decimal number out of a "4.5 out of 5 stars" style string. */
+/** Pull the rating out of a "4.5 out of 5 stars" / "5つ星のうち4.3" style string. */
 function parseRating(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  // Match "4.5", "4,5" etc.
-  const m = raw.match(/(\d+[.,]\d+|\d+)/);
+  // Prefer a short decimal (1–2 fractional digits) anywhere — locales put the max
+  // BEFORE the score, e.g. Japanese "5つ星のうち4.3" or German "4,5 von 5 Sternen".
+  // The (?!\d) guard stops a grouped review count ("1,234 ratings") from being read
+  // as the rating; only when there's no decimal do we fall back to a bare integer.
+  const m = raw.match(/\d[.,]\d{1,2}(?!\d)/) ?? raw.match(/\d+/);
   if (!m) return null;
-  const n = parseFloat(m[1].replace(",", "."));
+  const n = parseFloat(m[0].replace(",", "."));
   if (!Number.isFinite(n)) return null;
   // Sanity clamp: ratings are 0–5.
-  return n > 5 ? null : n;
+  return n < 0 || n > 5 ? null : n;
 }
 
-/** Parse an integer review/rating count, stripping thousands separators. */
+/**
+ * Parse an integer review/rating count. Takes the last grouped number (so a combined
+ * "4.2 out of 5 stars, 1,234 ratings" → 1234, not 4251234 or 42) and expands the
+ * "1.2K" / "1,2 mil" abbreviations Amazon uses in some locales.
+ */
 function parseCount(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  const digits = raw.replace(/[^\d]/g, "");
+  // Abbreviated: "1.2K", "3M", "1,2 mil", "2 tys." → multiply.
+  const abbr = raw.match(/(\d+(?:[.,]\d+)?)\s*(k|m|mil|tys|rb)\b/i);
+  if (abbr) {
+    const base = parseFloat(abbr[1].replace(",", "."));
+    const unit = abbr[2].toLowerCase();
+    const mult = unit === "m" ? 1_000_000 : 1_000; // k, mil, tys, rb, m
+    const n = Math.round(base * mult);
+    return Number.isFinite(n) ? n : null;
+  }
+  // Otherwise take the LAST grouped run of digits and strip its separators. Amazon's
+  // combined aria-labels put the count last ("4.2 out of 5 stars, 1,234 ratings" \u2192
+  // 1234), so the last run is the review count, not the leading rating.
+  const runs = raw.match(/\d[\d.,\s\u00a0\u202f]*\d|\d/g);
+  if (!runs || runs.length === 0) return null;
+  const digits = runs[runs.length - 1].replace(/[^\d]/g, "");
   if (!digits) return null;
   const n = parseInt(digits, 10);
   return Number.isFinite(n) ? n : null;
@@ -121,9 +142,12 @@ export async function searchProducts(
     });
   });
 
-  if (results.length === 0 && cards.length === 0) {
-    // Neither a parseable title nor any result cards: treat the page as unusable.
-    throw new Error(`No search results parsed for "${query}" on ${mp.host} (page layout changed or blocked).`);
+  if (results.length === 0) {
+    // Either no result cards at all, or cards were present but none parsed (layout
+    // changed / soft-blocked). Throw instead of returning [] so the empty result is
+    // not cached as a success and the caller can report a real failure.
+    const detail = cards.length > 0 ? "result cards present but none parsed" : "no result cards found";
+    throw new Error(`No search results parsed for "${query}" on ${mp.host} (${detail} — page layout changed or blocked).`);
   }
 
   return results;
@@ -141,14 +165,19 @@ export async function getProductDetails(
 
   const title = firstText($, ["#productTitle", "#title", "h1#title span"]);
 
+  // Buybox/core-price selectors FIRST so we read THIS product's price, not the first
+  // `.a-price` on the page (which is often a "customers also bought" carousel item).
   let price = parsePrice(
     firstText($, [
-      ".a-price .a-offscreen",
       "#corePrice_feature_div .a-offscreen",
       "#corePriceDisplay_desktop_feature_div .a-offscreen",
+      "#price_inside_buybox",
       "#priceblock_ourprice",
       "#priceblock_dealprice",
-      "#price_inside_buybox",
+      "#apex_desktop .a-price .a-offscreen",
+      "#centerCol .a-price .a-offscreen",
+      "#buybox .a-price .a-offscreen",
+      ".a-price .a-offscreen",
     ]),
   );
   // Some layouts leave .a-offscreen empty and render the visible price in split nodes
@@ -186,7 +215,17 @@ export async function getProductDetails(
     if (txt) features.push(txt);
   });
 
-  const availability = firstText($, ["#availability span", "#availability"]);
+  // Strip any <script>/<style> children before reading text — dead/error pages
+  // sometimes render inline JS inside #availability, which .text() would slurp.
+  $("#availability script, #availability style").remove();
+  const availabilityRaw = firstText($, ["#availability span", "#availability"]);
+  // Drop it only if it still looks like leftover code (real availability strings like
+  // "Only 3 left in stock; order soon." contain normal punctuation, so ";" alone must
+  // not trip this). The caller clips the length, so no length cap is needed here.
+  const availability =
+    availabilityRaw && /\bfunction\b|=>|window\.|document\.|var\s+\w+\s*=|\{\s*["'\w]+\s*:/.test(availabilityRaw)
+      ? null
+      : availabilityRaw;
 
   // Brand: byline anchor first, otherwise scan the product detail tables for a "Brand" row.
   let brand = firstText($, ["#bylineInfo"]);
@@ -202,9 +241,16 @@ export async function getProductDetails(
     if (txt) breadcrumbs.push(txt);
   });
 
-  const isPrime = $("#primeBadge").length > 0 || $("i.a-icon-prime").length > 0;
+  // Scope the Prime badge to the buybox/delivery area so we don't pick up a Prime
+  // icon from an unrelated "customers also bought" carousel on the same page.
+  const isPrime =
+    $("#primeBadge").length > 0 ||
+    $("#buybox i.a-icon-prime, #desktop_buybox i.a-icon-prime, #ppd i.a-icon-prime, #priceBadging_feature_div i.a-icon-prime, #deliveryBlockMessage i.a-icon-prime").length > 0;
 
-  if (!title && features.length === 0 && !price) {
+  // A real product page always has a title. Without one we can't tell whether the
+  // price/Prime we scraped belong to this ASIN (dead pages leak carousel data), so
+  // refuse rather than fabricate an incoherent product.
+  if (!title) {
     throw new Error(`Failed to parse product page for ASIN ${asin} on ${mp.host} (layout changed or blocked).`);
   }
 
