@@ -29,13 +29,21 @@ export interface Config {
   cacheDbPath: string;
 }
 
+/** Parse a positive-integer env var, falling back to `fallback` for missing/invalid/≤0. */
+function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  // Floor first, THEN check > 0: a fractional value like "0.9" must fall back to the
+  // default, not floor to 0 (a 0 TTL would disable the cache entirely).
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export function loadConfig(): Config {
   const defaultMarketplace = (process.env.AMAZON_DEFAULT_MARKETPLACE || "US").toUpperCase() as MarketplaceCode;
   return {
     defaultMarketplace: MARKETPLACES[defaultMarketplace] ? defaultMarketplace : "US",
-    cacheTtlProduct: Number(process.env.AMAZON_CACHE_TTL_PRODUCT) || 3600,
-    cacheTtlPriceHistory: Number(process.env.AMAZON_CACHE_TTL_PRICE_HISTORY) || 21600,
-    cacheTtlDeals: Number(process.env.AMAZON_CACHE_TTL_DEALS) || 900,
+    cacheTtlProduct: positiveIntEnv(process.env.AMAZON_CACHE_TTL_PRODUCT, 3600),
+    cacheTtlPriceHistory: positiveIntEnv(process.env.AMAZON_CACHE_TTL_PRICE_HISTORY, 21600),
+    cacheTtlDeals: positiveIntEnv(process.env.AMAZON_CACHE_TTL_DEALS, 900),
     cacheDbPath: process.env.AMAZON_CACHE_DB_PATH || "",
   };
 }

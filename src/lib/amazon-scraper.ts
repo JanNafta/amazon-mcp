@@ -29,22 +29,54 @@ function firstAttr($: CheerioAPI, selectors: string[], attr: string): string | n
   return null;
 }
 
-/** Pull the first decimal number out of a "4.5 out of 5 stars" style string. */
+/** Pull the rating out of a "4.5 out of 5 stars" / "5つ星のうち4.3" style string. */
 function parseRating(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  // Match "4.5", "4,5" etc.
-  const m = raw.match(/(\d+[.,]\d+|\d+)/);
+  // Japanese puts the max first ("5つ星のうち4" = 4 out of 5 stars): the score is the
+  // number right after のうち, even when it's an integer — handle it explicitly so the
+  // integer fallback below doesn't grab the leading max instead.
+  const jp = raw.match(/のうち\s*(\d+(?:[.,]\d+)?)/);
+  // Otherwise prefer a short decimal (1–2 fractional digits, not embedded in a longer
+  // number — the lookarounds keep "10.5" or a grouped count "1,234" from half-matching)
+  // anywhere in the string; only when there's no decimal fall back to a bare integer.
+  const m = jp ? [jp[1]] : (raw.match(/(?<!\d)\d+[.,]\d{1,2}(?!\d)/) ?? raw.match(/\d+/));
   if (!m) return null;
-  const n = parseFloat(m[1].replace(",", "."));
+  const n = parseFloat(m[0].replace(",", "."));
   if (!Number.isFinite(n)) return null;
   // Sanity clamp: ratings are 0–5.
-  return n > 5 ? null : n;
+  return n < 0 || n > 5 ? null : n;
 }
 
-/** Parse an integer review/rating count, stripping thousands separators. */
+/**
+ * Parse an integer review/rating count. Strips any "X out of 5 stars" rating segment,
+ * expands abbreviations ("1.2K", "1,2 mil", Japanese "1.6万" = 16,000), then takes the
+ * last grouped integer — so a combined "4.2 out of 5 stars, 1,234 ratings" → 1234 and a
+ * rating-only label ("4.2 out of 5 stars, rating details") → null, never a fabrication.
+ */
 function parseCount(raw: string | null | undefined): number | null {
   if (!raw) return null;
-  const digits = raw.replace(/[^\d]/g, "");
+  // Drop the rating segment in any supported locale so its numbers can't be mistaken
+  // for the count ("4.2 out of 5", "4,5 von 5 Sternen", "5つ星のうち4.2", "4,2 su 5"…).
+  const cleaned = raw
+    .replace(/\d+(?:[.,]\d+)?\s*(?:out of|von|de|su|sur|van|z|w)\s*5\b[^,;]*/gi, " ")
+    .replace(/5\s*つ星のうち\s*\d+(?:[.,]\d+)?/g, " ");
+  // Abbreviated: "1.2K", "3M", "1,2 mil", "1,2 Mio.", "2 tys.", JP "1.6万" / "3千".
+  const abbr = cleaned.match(/(\d+(?:[.,]\d+)?)\s*(k|mio|m|mil|tys|rb|万|千)(?![a-z])/i);
+  if (abbr) {
+    const base = parseFloat(abbr[1].replace(",", "."));
+    const unit = abbr[2].toLowerCase();
+    const mult = unit === "m" || unit === "mio" ? 1_000_000 : unit === "万" ? 10_000 : 1_000;
+    const n = Math.round(base * mult);
+    return Number.isFinite(n) ? n : null;
+  }
+  // Take the LAST grouped run of digits (combined aria-labels put the count last),
+  // skipping runs shaped like a bare decimal rating ("4.2") — a real count is either
+  // a plain integer or grouped in 3s.
+  const runs = cleaned.match(/\d[\d.,\s\u00a0\u202f]*\d|\d/g);
+  if (!runs || runs.length === 0) return null;
+  const candidates = runs.filter((r) => !/^\d+[.,]\d{1,2}$/.test(r.trim()));
+  if (candidates.length === 0) return null;
+  const digits = candidates[candidates.length - 1].replace(/[^\d]/g, "");
   if (!digits) return null;
   const n = parseInt(digits, 10);
   return Number.isFinite(n) ? n : null;
@@ -85,7 +117,11 @@ export async function searchProducts(
     ]);
     if (!asin || !title) return;
 
-    const price = parsePrice(scopedFirstText($card, [".a-price .a-offscreen"]));
+    // :not(.a-text-price) skips the struck-through list price some deal cards render
+    // before the real price.
+    const price = parsePrice(
+      scopedFirstText($card, [".a-price:not(.a-text-price) .a-offscreen", ".a-price .a-offscreen"]),
+    );
 
     const ratingRaw = scopedFirstAttr($card, ["i.a-icon-star-small", "i.a-icon-star", ".a-icon-star-small", ".a-icon-star"], "aria-label")
       ?? scopedFirstText($card, ["i.a-icon-star-small .a-icon-alt", "i.a-icon-star .a-icon-alt", ".a-icon-alt"]);
@@ -99,11 +135,14 @@ export async function searchProducts(
 
     const imageUrl = scopedFirstAttr($card, ["img.s-image"], "src");
 
+    // Icon badges only exist in the JS-hydrated page; the server-rendered HTML the
+    // scraper sees carries Prime membership in the delivery block's text instead.
+    const deliveryText = $card.find('[data-cy="delivery-recipe"], .udm-primary-delivery-message, [aria-label*="delivery"]').text();
     const isPrime =
       $card.find("i.a-icon-prime").length > 0 ||
       $card.find('[aria-label="Amazon Prime"]').length > 0 ||
-      $card.find(".aok-relative.s-icon-text-margin-right i.a-icon-prime").length > 0 ||
-      $card.find(".s-prime").length > 0;
+      $card.find(".s-prime").length > 0 ||
+      /\bprime\b/i.test(deliveryText);
 
     seen.add(asin);
     results.push({
@@ -121,12 +160,35 @@ export async function searchProducts(
     });
   });
 
-  if (results.length === 0 && cards.length === 0) {
-    // Neither a parseable title nor any result cards: treat the page as unusable.
-    throw new Error(`No search results parsed for "${query}" on ${mp.host} (page layout changed or blocked).`);
+  if (results.length === 0) {
+    // A genuine "no results" page is a valid empty answer, not a failure.
+    if (cards.length === 0 && /did not match any products|no results for|No se encontraron resultados|Keine Ergebnisse|Aucun r\u00e9sultat|Nessun risultato/i.test(html)) {
+      return [];
+    }
+    // Otherwise: no cards at all, or cards present but none parsed (layout changed /
+    // soft-blocked). Throw instead of returning [] so the empty result is not cached
+    // as a success and the caller can report a real failure.
+    const detail = cards.length > 0 ? "result cards present but none parsed" : "no result cards found";
+    throw new Error(`No search results parsed for "${query}" on ${mp.host} (${detail} — page layout changed or blocked).`);
   }
 
   return results;
+}
+
+/**
+ * Clean a #bylineInfo byline into a brand name: collapse internal whitespace and
+ * unwrap "Visit the X Store" / "Brand: X" (and localized variants). Author bylines
+ * ("Jane Doe (Author)") are not a brand -> null so the caller can try the spec table.
+ */
+function cleanBrand(byline: string | null): string | null {
+  if (!byline) return null;
+  const flat = byline.replace(/\s+/g, " ").trim();
+  const store = flat.match(/^Visit(?:a|e[zr]?)? (?:the |la |el |lo Store di |den )?(.+?)(?:[- ]Store| Shop)?$/i);
+  if (store) return store[1].trim() || null;
+  const labeled = flat.match(/^(?:Brand|Marca|Marque|Marke)\s*:\s*(.+)$/i);
+  if (labeled) return labeled[1].trim() || null;
+  if (/\(Author\)|\(Autor\)|\(Auteur\)/i.test(flat) || /^by /i.test(flat)) return null;
+  return flat;
 }
 
 /** Scrape a single product detail page. */
@@ -141,14 +203,20 @@ export async function getProductDetails(
 
   const title = firstText($, ["#productTitle", "#title", "h1#title span"]);
 
+  // Buybox/core-price selectors FIRST so we read THIS product's price, not the first
+  // `.a-price` on the page (which is often a "customers also bought" carousel item).
   let price = parsePrice(
     firstText($, [
-      ".a-price .a-offscreen",
       "#corePrice_feature_div .a-offscreen",
       "#corePriceDisplay_desktop_feature_div .a-offscreen",
+      "#price_inside_buybox",
       "#priceblock_ourprice",
       "#priceblock_dealprice",
-      "#price_inside_buybox",
+      "#apex_desktop .a-price:not(.a-text-price) .a-offscreen",
+      "#centerCol .a-price:not(.a-text-price) .a-offscreen",
+      "#buybox .a-price:not(.a-text-price) .a-offscreen",
+      ".a-price:not(.a-text-price) .a-offscreen",
+      ".a-price .a-offscreen",
     ]),
   );
   // Some layouts leave .a-offscreen empty and render the visible price in split nodes
@@ -186,10 +254,22 @@ export async function getProductDetails(
     if (txt) features.push(txt);
   });
 
-  const availability = firstText($, ["#availability span", "#availability"]);
+  // Strip any <script>/<style> children before reading text — dead/error pages
+  // sometimes render inline JS inside #availability, which .text() would slurp.
+  $("#availability script, #availability style").remove();
+  const availabilityRaw = firstText($, ["#availability span", "#availability"]);
+  // Drop it only if it still looks like leftover code (real availability strings like
+  // "Only 3 left in stock; order soon." contain normal punctuation, so ";" alone must
+  // not trip this). The caller clips the length, so no length cap is needed here.
+  const availability =
+    availabilityRaw && /\bfunction\b|=>|window\.|document\.|var\s+\w+\s*=|\{\s*["'\w]+\s*:/.test(availabilityRaw)
+      ? null
+      : availabilityRaw;
 
-  // Brand: byline anchor first, otherwise scan the product detail tables for a "Brand" row.
-  let brand = firstText($, ["#bylineInfo"]);
+  // Brand: byline anchor first (unwrapping "Visit the X Store" / "Brand: X" and
+  // collapsing internal whitespace), otherwise scan the detail tables for a Brand row.
+  // Author-style bylines ("by Jane Doe (Author)") are NOT a brand -> fall through.
+  let brand = cleanBrand(firstText($, ["#bylineInfo"]));
   if (!brand) {
     brand = findTableValue($, ["brand", "marca", "marque", "marke"]);
   }
@@ -202,9 +282,16 @@ export async function getProductDetails(
     if (txt) breadcrumbs.push(txt);
   });
 
-  const isPrime = $("#primeBadge").length > 0 || $("i.a-icon-prime").length > 0;
+  // Scope the Prime badge to the buybox/delivery area so we don't pick up a Prime
+  // icon from an unrelated "customers also bought" carousel on the same page.
+  const isPrime =
+    $("#primeBadge").length > 0 ||
+    $("#buybox i.a-icon-prime, #desktop_buybox i.a-icon-prime, #ppd i.a-icon-prime, #priceBadging_feature_div i.a-icon-prime, #deliveryBlockMessage i.a-icon-prime").length > 0;
 
-  if (!title && features.length === 0 && !price) {
+  // A real product page always has a title. Without one we can't tell whether the
+  // price/Prime we scraped belong to this ASIN (dead pages leak carousel data), so
+  // refuse rather than fabricate an incoherent product.
+  if (!title) {
     throw new Error(`Failed to parse product page for ASIN ${asin} on ${mp.host} (layout changed or blocked).`);
   }
 
@@ -240,7 +327,7 @@ function findTableValue($: CheerioAPI, keys: string[]): string | null {
     if (found) return;
     const $row = $(el);
     const label = ($row.find("th").first().text() || $row.find(".a-text-bold").first().text())
-      .replace(/[\s :]+/g, " ")
+      .replace(/[\s\u00a0:]+/g, " ")
       .trim()
       .toLowerCase();
     if (!label) return;

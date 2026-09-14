@@ -19,10 +19,27 @@ describe("parsePrice", () => {
     expect(parsePrice("12,99")).toBe(12.99);
   });
 
-  it("treats a lone comma as a decimal separator: '1,299' -> 1.299", () => {
-    // Source quirk: when there is no dot, parsePrice always treats the comma as
-    // the decimal separator (EU branch), so "1,299" is 1.299 — NOT 1299.
-    expect(parsePrice("1,299")).toBe(1.299);
+  it("treats a lone comma before 3 digits as a thousands group: '1,299' -> 1299", () => {
+    // A separator followed by exactly 3 digits is a thousands group (Amazon never
+    // renders a bare 3-decimal price), so "1,299" is 1299 — not 1.299.
+    expect(parsePrice("1,299")).toBe(1299);
+  });
+
+  it("treats a comma before 2 digits as a decimal separator: '12,99' -> 12.99", () => {
+    expect(parsePrice("12,99")).toBe(12.99);
+  });
+
+  it("parses grouped JPY/USD integers with no decimals: '￥4,988' -> 4988, '$1,234' -> 1234", () => {
+    expect(parsePrice("￥4,988")).toBe(4988);
+    expect(parsePrice("$1,234")).toBe(1234);
+  });
+
+  it("parses the Indian lakh grouping: '₹1,29,900' -> 129900", () => {
+    expect(parsePrice("₹1,29,900")).toBe(129900);
+  });
+
+  it("returns only the first price of a range: '10,99 € - 24,99 €' -> 10.99", () => {
+    expect(parsePrice("10,99 € - 24,99 €")).toBe(10.99);
   });
 
   it("returns null for empty string", () => {

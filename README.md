@@ -97,7 +97,7 @@ Configuration is read from environment variables. For local development you can 
 
 ### About the associate tags
 
-Amazon Associates tags follow the convention `yourname-XX`, where `XX` is a marketplace-specific suffix. This server is aware of the correct suffix per marketplace:
+Amazon Associates tags follow the convention `yourname-XX`, where `XX` is a marketplace-specific suffix:
 
 | Suffix | Marketplaces |
 | --- | --- |
@@ -106,6 +106,8 @@ Amazon Associates tags follow the convention `yourname-XX`, where `XX` is a mark
 | `22` | JP, AU |
 
 Set the tag that matches each marketplace you care about. There is also a generic `AMAZON_ASSOCIATE_TAG` fallback used when no marketplace-specific tag is set.
+
+Each Associates program is per-country, so a tag from one program (e.g. a US `-20` tag) earns **no commission** on another marketplace. The server does **not** rewrite tags for you, but it **validates** each tag and warns you in the buy-link response when a tag's suffix doesn't match the marketplace it's being used on, or when a tag is malformed (stray spaces, an inline comment left in `.env`, etc.) — so a misconfiguration surfaces instead of silently costing you commission.
 
 ## Connecting to Claude Desktop / Claude Code
 
@@ -268,9 +270,12 @@ Price history is **local-first**. Every time a product price is fetched (via `ge
 - *"Below average — good deal"*
 - *"Around the average price"*
 - *"Above average — consider waiting"*
-- *"Not enough history yet — look this product up a few more times to build a trend"*
+- *"The tracked price has held steady at … — no drop yet"* (local history exists but has never moved)
+- *"Not enough history yet — check this product again over the next few days to build a trend"*
 
-This means a product's trend **starts empty and grows as you use it**. To seed a baseline quickly, look a product up a few times (or add a price watch and refresh it with `checkNow`).
+Strong buy/wait calls are **gated by evidence**: they require CamelCamelCamel data or at least a few locally tracked points, so a first lookup never fabricates an "at the lowest price ever" claim from a single self-recorded data point. When both Amazon and CCC are unreachable, the reported price falls back to the newest local record and is labeled with its *last seen* date.
+
+This means a product's trend **starts empty and grows as you use it**. To seed a baseline quickly, look a product up over a few days (or add a price watch and refresh it with `checkNow`).
 
 The server also makes a **best-effort** attempt at **[CamelCamelCamel](https://camelcamelcamel.com/)** and merges its numbers when reachable — but CCC is Cloudflare-protected and usually unavailable over plain HTTP (see [Limitations](#limitations)). The same SQLite database backs the response cache and stored price watches.
 
@@ -297,6 +302,8 @@ npm run build      # compile TypeScript to dist/
 ## Disclaimer
 
 This project performs **web scraping of public pages** on Amazon and CamelCamelCamel. Respect their Terms of Service and rate limits, and use it at your own responsibility. It is **not affiliated with, endorsed by, or sponsored by Amazon** or CamelCamelCamel. "Amazon" and related marks are trademarks of Amazon.com, Inc. or its affiliates. Scraped sites can change their markup or block automated access at any time; the server degrades gracefully but results are not guaranteed.
+
+> **Associates Operating Agreement note.** Link-based affiliate attribution (tagging a buy link) is the legitimate, documented way Associates earn. However, **sourcing the underlying product data by scraping Amazon** — rather than via the official [Product Advertising API](https://webservices.amazon.com/paapi5/documentation/) — can conflict with the [Amazon Associates Operating Agreement](https://affiliate-program.amazon.com/help/operating/agreement) and Amazon's `robots.txt`/Conditions of Use, and has been cited in account terminations. If you rely on your Associates income, prefer the PA-API (which requires an approved account and qualifying sales) or [Keepa](https://keepa.com/#!api) as the data source, and treat this server's scraping tools as a convenience for personal/experimental use. You are responsible for your own compliance.
 
 ## License
 

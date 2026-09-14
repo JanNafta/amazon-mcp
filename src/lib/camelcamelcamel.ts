@@ -14,7 +14,11 @@ import { fetchHtml, parsePrice } from "./http.js";
  * when the HTML is blocked).
  */
 
-/** Amazon marketplace code -> CCC subdomain host. */
+/**
+ * Amazon marketplace code -> CCC subdomain host. Only marketplaces CCC actually
+ * serves: jp.camelcamelcamel.com does NOT exist (NXDOMAIN), so JP degrades to the
+ * "not available" branch like MX/IN/BR. AU exists and is included.
+ */
 const CCC_HOSTS: Partial<Record<MarketplaceCode, string>> = {
   US: "camelcamelcamel.com",
   UK: "uk.camelcamelcamel.com",
@@ -22,8 +26,8 @@ const CCC_HOSTS: Partial<Record<MarketplaceCode, string>> = {
   FR: "fr.camelcamelcamel.com",
   IT: "it.camelcamelcamel.com",
   ES: "es.camelcamelcamel.com",
-  CA: "camelcamelcamel.com",
-  JP: "jp.camelcamelcamel.com",
+  CA: "ca.camelcamelcamel.com",
+  AU: "au.camelcamelcamel.com",
 };
 
 /** Amazon marketplace code -> CCC country code used in the charts host. */
@@ -34,8 +38,8 @@ const CCC_COUNTRY: Partial<Record<MarketplaceCode, string>> = {
   FR: "fr",
   IT: "it",
   ES: "es",
-  JP: "jp",
-  CA: "us",
+  CA: "ca",
+  AU: "au",
 };
 
 interface ParsedRow {
@@ -64,15 +68,33 @@ function normalizeDate(raw: string | null | undefined): string | null {
   if (!trimmed) return null;
   const d = new Date(trimmed);
   if (Number.isNaN(d.getTime())) {
-    // Keep the raw string if it looks date-like, otherwise drop it.
-    return /\d/.test(trimmed) ? trimmed : null;
+    // Keep the raw string if it looks date-like (but never a price), otherwise drop it.
+    return /\d/.test(trimmed) && !looksLikePrice(trimmed) ? trimmed : null;
   }
-  return d.toISOString().slice(0, 10);
+  // Format from LOCAL components: "Dec 24, 2024" parses as local midnight, so
+  // toISOString() would shift it to the previous day in any UTC+ timezone.
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
 }
 
-/** True when a table cell's text carries a price (currency symbol or digits). */
+/**
+ * True when a cell carries a price: a currency symbol (incl. full-width ￥ U+FFE5 and
+ * 円 used on Amazon JP), or a number with 2-decimal cents. JPY/INR have no cents, so the
+ * symbol check is what catches them (e.g. "￥4,988").
+ */
 function looksLikePrice(text: string): boolean {
-  return /[\d$£€¥]/.test(text);
+  return /[$£€¥￥₹円]/.test(text) || /\d[\d.,\s]*[.,]\d{2}(?!\d)/.test(text);
+}
+
+/** True when a cell looks like a date (month name or a slash/dash date or a bare year). */
+function looksLikeDate(text: string): boolean {
+  return (
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(text) ||
+    /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/.test(text) ||
+    /\b(19|20)\d{2}\b/.test(text)
+  );
 }
 
 /**
@@ -105,10 +127,15 @@ function parsePriceTable($: cheerio.CheerioAPI): ParsedRow {
     const priceCell = cellTexts.slice(1).find((t) => looksLikePrice(t)) ?? null;
     const price = priceCell ? parsePrice(priceCell) : null;
 
-    // Date cell: a later cell that does not itself look like a price.
-    const dateCell =
-      cellTexts.slice(1).find((t) => t.length > 0 && !looksLikePrice(t)) ?? null;
+    // Date cell: a later cell that looks like a date AND not like a price — otherwise
+    // "$1,999.00" (contains "1,999" ≈ a year) or "￥1980" would be picked as the date.
+    const dateCell = cellTexts.slice(1).find((t) => looksLikeDate(t) && !looksLikePrice(t)) ?? null;
     const date = normalizeDate(dateCell);
+
+    // Row labels are localized on CCC's country sites (de/fr/it/es) — match all.
+    const isLowest = /lowest|niedrigst|plus bas|più basso|más bajo|mas bajo|mínimo|minimo/.test(label);
+    const isHighest = /highest|höchst|hochst|plus haut|più alto|más alto|mas alto|máximo|maximo/.test(label);
+    const isAverage = /average|durchschnitt|moyen|medio|media/.test(label);
 
     if ((label.includes("current") || label.includes("amazon")) && !sawCurrent) {
       // Only the first "current"/"amazon" row sets the current price.
@@ -116,13 +143,13 @@ function parsePriceTable($: cheerio.CheerioAPI): ParsedRow {
         result.current = price;
         sawCurrent = true;
       }
-    } else if (label.includes("lowest")) {
+    } else if (isLowest) {
       if (price !== null && result.lowest === null) result.lowest = price;
       if (date && result.lowestDate === null) result.lowestDate = date;
-    } else if (label.includes("highest")) {
+    } else if (isHighest) {
       if (price !== null && result.highest === null) result.highest = price;
       if (date && result.highestDate === null) result.highestDate = date;
-    } else if (label.includes("average")) {
+    } else if (isAverage) {
       if (price !== null && result.average === null) result.average = price;
     }
   });
@@ -186,8 +213,9 @@ export async function getPriceHistory(
   try {
     html = await fetchHtml(url, { acceptLanguage: "en-US,en;q=0.9", retries: 2 });
   } catch {
-    // CamelCamelCamel is Cloudflare-protected; the page (and its chart CDN) are
-    // unreachable over plain HTTP. The caller falls back to local price tracking.
+    // CamelCamelCamel is Cloudflare-protected; the page is unreachable over plain
+    // HTTP. Keep the chart URL anyway — it needs no fetch to build, and the chart CDN
+    // sometimes still renders in a real browser even when the HTML is blocked.
     return {
       asin,
       marketplace: code,
@@ -201,7 +229,7 @@ export async function getPriceHistory(
       dropFromHighPct: null,
       verdict: "CamelCamelCamel unavailable (Cloudflare-protected) — using local price history",
       source: "camelcamelcamel",
-      chartUrl: null,
+      chartUrl,
     };
   }
 
@@ -241,7 +269,7 @@ export async function getPriceHistory(
       dropFromHighPct: null,
       verdict: "Could not parse CamelCamelCamel — using local price history",
       source: "camelcamelcamel",
-      chartUrl: null,
+      chartUrl,
     };
   }
 }

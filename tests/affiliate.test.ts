@@ -9,6 +9,15 @@ import {
   withAffiliateTag,
 } from "../src/lib/affiliate.js";
 
+// Pin the generic tag and every per-marketplace tag to "" so real values exported in
+// the developer's shell or .env can't leak into these assertions.
+beforeEach(() => {
+  vi.stubEnv("AMAZON_ASSOCIATE_TAG", "");
+  for (const c of ["US", "ES", "UK", "DE", "FR", "IT", "CA", "JP", "MX", "IN", "BR", "AU"]) {
+    vi.stubEnv(`AMAZON_ASSOCIATE_TAG_${c}`, "");
+  }
+});
+
 describe("affiliate — with AMAZON_ASSOCIATE_TAG_US set", () => {
   beforeEach(() => {
     vi.stubEnv("AMAZON_ASSOCIATE_TAG_US", "mytag-20");
