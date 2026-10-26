@@ -2,7 +2,15 @@
   "name": "@jannafta/amazon-mcp",
   "version": "0.1.0",
   "description": "Amazon MCP server: product search, price history (Camelizer-style), deals tracking, and affiliate-tagged purchase links",
-  "keywords": ["mcp", "amazon", "affiliate", "price-tracker", "camelcamelcamel", "claude", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "amazon",
+    "affiliate",
+    "price-tracker",
+    "camelcamelcamel",
+    "claude",
+    "model-context-protocol"
+  ],
   "license": "MIT",
   "author": "Jan Nafta <jannafta@gmail.com>",
   "repository": {
@@ -15,7 +23,12 @@
   "bin": {
     "amazon-mcp": "dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE", ".env.example"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -32,8 +45,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
     "axios": "^1.7.9",
-    "better-sqlite3": "^11.7.0",
+    "better-sqlite3": "^13.0.3",
     "cheerio": "^1.0.0",
+    "got-scraping": "^4.2.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {

@@ -79,9 +79,9 @@ server.registerTool(
   {
     title: "Search Amazon products",
     description:
-      "Search Amazon for products by keyword. Returns title, price, rating, image and an AFFILIATE purchase link (with your Associates tag) for each result.",
+      "Search Amazon for hardware parts, components, and products by keyword. Returns title, price, rating, availability, and product link for each result.",
     inputSchema: {
-      query: z.string().min(1).describe("Search keywords, e.g. 'mechanical keyboard'"),
+      query: z.string().min(1).describe("Search keywords, e.g. 'M2 socket head screws' or 'ESP32'"),
       marketplace: marketplaceSchema,
       limit: z.number().int().min(1).max(40).optional().describe("Max results (default 16)"),
     },
@@ -95,7 +95,7 @@ server.registerTool(
 
       const lines = results.map((p, i) => {
         const rating = p.rating != null ? `★${p.rating}${p.reviewCount != null ? ` (${p.reviewCount.toLocaleString()})` : ""}` : "";
-        return `${i + 1}. ${p.title}\n   ${money(p.price, p.currency)}  ${rating}  ${p.isPrime ? "✓Prime" : ""}\n   ASIN: ${p.asin}\n   Buy (affiliate): ${p.affiliateUrl}`;
+        return `${i + 1}. ${p.title}\n   ${money(p.price, p.currency)}  ${rating}  ${p.isPrime ? "✓Prime" : ""}\n   ASIN: ${p.asin}\n   URL: ${p.url}`;
       });
       return text(`Top ${results.length} results for "${query}" on Amazon ${code}:\n\n${lines.join("\n\n")}`);
     } catch (e) {
@@ -110,7 +110,7 @@ server.registerTool(
   {
     title: "Get Amazon product details",
     description:
-      "Fetch full details for a product by ASIN: title, price, rating, features, availability, brand, breadcrumbs, plus an affiliate buy link. Also logs the price to local history.",
+      "Fetch full technical specifications and details for a product by ASIN: title, price, rating, features, specs, availability, and product link.",
     inputSchema: {
       asin: z.string().regex(/^[A-Z0-9]{10}$/i).describe("10-character Amazon ASIN, e.g. B08N5WRWNW"),
       marketplace: marketplaceSchema,
@@ -133,7 +133,7 @@ server.registerTool(
           `${p.brand ? `Brand: ${p.brand}\n` : ""}` +
           `${p.availability ? `Availability: ${p.availability}\n` : ""}` +
           `ASIN: ${p.asin} · Marketplace: ${code}${crumbs}\n` +
-          `Buy (affiliate): ${p.affiliateUrl}` +
+          `URL: ${p.url}` +
           feat,
       );
     } catch (e) {
@@ -232,9 +232,9 @@ server.registerTool(
   {
     title: "Get Amazon deals",
     description:
-      "Find current discounted products on Amazon, optionally filtered by category keyword and minimum discount. Each deal includes an affiliate buy link.",
+      "Find current discounted products on Amazon, optionally filtered by category keyword and minimum discount.",
     inputSchema: {
-      category: z.string().optional().describe("Category/keyword to filter deals, e.g. 'headphones'. Omit for general deals."),
+      category: z.string().optional().describe("Category/keyword to filter deals, e.g. 'screws' or 'multimeter'. Omit for general deals."),
       minDiscountPct: z.number().int().min(1).max(99).optional().describe("Only return deals with at least this % off"),
       marketplace: marketplaceSchema,
       limit: z.number().int().min(1).max(40).optional().describe("Max deals (default 20)"),
@@ -252,7 +252,7 @@ server.registerTool(
       const lines = deals.map((d, i) => {
         const disc = d.discountPct != null ? ` (−${d.discountPct}%)` : "";
         const was = d.listPrice != null ? ` was ${money(d.listPrice, d.currency)}` : "";
-        return `${i + 1}. ${d.title}\n   ${money(d.dealPrice, d.currency)}${disc}${was}\n   Buy (affiliate): ${d.affiliateUrl}`;
+        return `${i + 1}. ${d.title}\n   ${money(d.dealPrice, d.currency)}${disc}${was}\n   URL: https://${MARKETPLACES[code].host}/dp/${d.asin}`;
       });
       return text(`${deals.length} deals on Amazon ${code}${category ? ` for "${category}"` : ""}:\n\n${lines.join("\n\n")}`);
     } catch (e) {
@@ -265,9 +265,9 @@ server.registerTool(
 server.registerTool(
   "get_buy_link",
   {
-    title: "Get affiliate buy link",
+    title: "Get product purchase link",
     description:
-      "Generate affiliate-tagged purchase links for an ASIN: a product page link and a one-click add-to-cart link. Opening either drops a 24h Amazon affiliate cookie so the configured Associates account earns commission on the purchase. Use this whenever the user wants to buy something.",
+      "Generate clean direct purchase links for an ASIN: product page link and direct add-to-cart link.",
     inputSchema: {
       asin: z.string().regex(/^[A-Z0-9]{10}$/i).describe("10-character Amazon ASIN"),
       marketplace: marketplaceSchema,
@@ -279,11 +279,9 @@ server.registerTool(
     const a = asin.toUpperCase();
     const link = buildBuyLink(a, code, quantity ?? 1);
     return text(
-      `Affiliate buy links for ${a} (Amazon ${code}):\n\n` +
+      `Product links for ${a} (Amazon ${code}):\n\n` +
         `Product page: ${link.productUrl}\n` +
-        `Add to cart:  ${link.addToCartUrl}\n\n` +
-        `Associate tag: ${link.associateTag ?? "(none configured)"}\n` +
-        `${link.note}`,
+        `Add to cart:  ${link.addToCartUrl}`,
     );
   },
 );
@@ -294,7 +292,7 @@ server.registerTool(
   {
     title: "Compare an ASIN across marketplaces",
     description:
-      "Look up the same ASIN across several Amazon marketplaces and compare prices side by side. Each row includes an affiliate buy link. Note: prices are in each marketplace's local currency and the same ASIN may not exist everywhere.",
+      "Look up the same ASIN across several Amazon marketplaces and compare prices side by side.",
     inputSchema: {
       asin: z.string().regex(/^[A-Z0-9]{10}$/i).describe("10-character Amazon ASIN"),
       marketplaces: z
@@ -323,7 +321,7 @@ server.registerTool(
       const c = codes[i];
       if (r.status === "fulfilled") {
         const { p } = r.value;
-        rows.push(`${c}: ${money(p.price, p.currency)}  ${p.isPrime ? "✓Prime" : ""}\n   ${p.affiliateUrl}`);
+        rows.push(`${c}: ${money(p.price, p.currency)}  ${p.isPrime ? "✓Prime" : ""}\n   URL: ${p.url}`);
       } else {
         rows.push(`${c}: not available (${(r.reason as Error)?.message ?? "lookup failed"})`);
       }
@@ -409,6 +407,14 @@ server.registerTool(
   },
 );
 
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception in amazon-mcp (recovering):", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection in amazon-mcp (recovering):", reason);
+});
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -420,3 +426,4 @@ main().catch((e) => {
   console.error("Fatal:", e);
   process.exit(1);
 });
+

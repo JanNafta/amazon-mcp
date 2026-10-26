@@ -1,19 +1,10 @@
-import axios, { type AxiosRequestConfig } from "axios";
-
-const USER_AGENTS = [
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
-];
-
-function pickUserAgent(): string {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-}
+import { gotScraping } from "got-scraping";
+import { MARKETPLACES } from "../config.js";
+import { clearSessionCookies, getSessionCookies, saveSessionCookies } from "./cache.js";
 
 export interface FetchOptions {
   acceptLanguage?: string;
+  marketplace?: string;
   /** Number of retry attempts on transient failures. Default 3. */
   retries?: number;
   timeoutMs?: number;
@@ -73,54 +64,88 @@ function mergeCookies(prev: string, setCookie: string[] | undefined): string {
   return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
+/** Infer the Amazon marketplace code from a URL or explicit parameter. */
+function inferMarketplace(url: string, explicitCode?: string): string | null {
+  if (explicitCode) return explicitCode.toUpperCase();
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    for (const [code, mp] of Object.entries(MARKETPLACES)) {
+      if (mp.host.toLowerCase() === host) return code;
+    }
+  } catch {}
+  return null;
+}
+
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL_MS = 1500;
+
+/** Throttles requests with random jitter to stay under Amazon WAF burst rate limits. */
+async function throttle(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastRequestTime;
+  if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+    const jitter = Math.floor(Math.random() * 600);
+    await sleep(MIN_REQUEST_INTERVAL_MS - elapsed + jitter);
+  }
+  lastRequestTime = Date.now();
+}
+
 /**
- * GET a URL with browser-like headers, UA rotation and exponential backoff.
- * Amazon and CamelCamelCamel block obvious bots, so we mimic a real browser and
- * transparently follow up to 2 bot-manager meta-refresh challenge hops, carrying
- * the bm-verify token and any Set-Cookie values forward (as a real browser does).
+ * GET a URL with browser-like TLS/HTTP2 fingerprints (via got-scraping), persistent session cookies,
+ * rate throttling, and exponential backoff.
  */
 export async function fetchHtml(url: string, opts: FetchOptions = {}): Promise<string> {
-  const { acceptLanguage = "en-US,en;q=0.9", retries = 3, timeoutMs = 15000, headers = {} } = opts;
+  const { acceptLanguage = "en-US", retries = 3, timeoutMs = 15000, headers = {} } = opts;
+  const primaryLocale = acceptLanguage.split(",")[0].trim().split(";")[0] || "en-US";
+  const mpCode = inferMarketplace(url, opts.marketplace);
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const ua = pickUserAgent(); // keep a stable UA across hops within one attempt
-    let cookies = "";
+    // 1. Throttle requests to prevent bursting WAF velocity alarms
+    await throttle();
+
+    // 2. Load seed cookies: env var override first, then persistent SQLite cache
+    const envCookie = mpCode ? (process.env[`AMAZON_COOKIE_${mpCode}`] || process.env.AMAZON_COOKIE || "").trim() : "";
+    const cachedCookie = mpCode ? getSessionCookies(mpCode) : "";
+    let cookies = mergeCookies(cachedCookie, envCookie ? [envCookie] : undefined);
+
     try {
       let currentUrl = url;
       let body = "";
 
       for (let hop = 0; hop <= 2; hop++) {
-        const config: AxiosRequestConfig = {
-          timeout: timeoutMs,
+        const mergedHeaders: Record<string, string> = { ...headers };
+        if (cookies) {
+          mergedHeaders["cookie"] = cookies;
+        }
+
+        const res = await gotScraping({
+          url: currentUrl,
+          timeout: { request: timeoutMs },
           maxRedirects: 5,
-          responseType: "text",
-          // Accept any 2xx-4xx so we can inspect blocked/captcha pages instead of throwing.
-          validateStatus: (s) => s < 500,
-          headers: {
-            "User-Agent": ua,
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": acceptLanguage,
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            Pragma: "no-cache",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": hop === 0 ? "none" : "same-origin",
-            "Upgrade-Insecure-Requests": "1",
-            ...(cookies ? { Cookie: cookies } : {}),
-            ...headers,
+          throwHttpErrors: false,
+          headers: Object.keys(mergedHeaders).length > 0 ? mergedHeaders : undefined,
+          headerGeneratorOptions: {
+            browsers: [{ name: "chrome" }],
+            devices: ["desktop"],
+            operatingSystems: ["windows"],
+            locales: [primaryLocale],
           },
-        };
+        });
 
-        const res = await axios.get<string>(currentUrl, config);
-        body = res.data ?? "";
-        cookies = mergeCookies(cookies, res.headers?.["set-cookie"] as string[] | undefined);
+        body = res.body;
+        cookies = mergeCookies(cookies, res.headers["set-cookie"]);
 
-        if (res.status === 429 || res.status === 503) {
-          throw new Error(`Rate limited (HTTP ${res.status})`);
+        // Persist accumulated session cookies to SQLite
+        if (mpCode && cookies) {
+          saveSessionCookies(mpCode, cookies);
+        }
+
+        if (res.statusCode === 429 || res.statusCode === 503) {
+          throw new Error(`Rate limited (HTTP ${res.statusCode})`);
         }
         if (typeof body === "string" && CAPTCHA_RE.test(body)) {
+          if (mpCode) clearSessionCookies(mpCode);
           throw new Error("Blocked by Amazon bot detection (CAPTCHA page)");
         }
         if (typeof body === "string" && isWafChallenge(body)) {

@@ -7,12 +7,15 @@ import {
   addWatch,
   cacheGet,
   cacheSet,
+  clearSessionCookies,
   closeDb,
   getOrFetch,
   getPriceLog,
+  getSessionCookies,
   listWatches,
   logPrice,
   removeWatch,
+  saveSessionCookies,
   updateWatchPrice,
 } from "../src/lib/cache.js";
 
@@ -58,6 +61,31 @@ describe("generic cache", () => {
   });
 });
 
+describe("session cookies", () => {
+  it("saves and retrieves session cookies by marketplace", () => {
+    expect(getSessionCookies("US")).toBe("");
+    saveSessionCookies("US", "session-id=123-456; ubid-main=789-012");
+    expect(getSessionCookies("US")).toBe("session-id=123-456; ubid-main=789-012");
+    expect(getSessionCookies("CA")).toBe("");
+  });
+
+  it("clears session cookies for a specific marketplace", () => {
+    saveSessionCookies("US", "cookie=us");
+    saveSessionCookies("CA", "cookie=ca");
+    clearSessionCookies("US");
+    expect(getSessionCookies("US")).toBe("");
+    expect(getSessionCookies("CA")).toBe("cookie=ca");
+  });
+
+  it("clears all session cookies when no marketplace specified", () => {
+    saveSessionCookies("US", "cookie=us");
+    saveSessionCookies("CA", "cookie=ca");
+    clearSessionCookies();
+    expect(getSessionCookies("US")).toBe("");
+    expect(getSessionCookies("CA")).toBe("");
+  });
+});
+
 describe("getOrFetch", () => {
   it("calls the fetcher only on a cache miss", async () => {
     const fetcher = vi.fn(async () => ({ v: 42 }));
@@ -98,18 +126,13 @@ describe("price watches", () => {
 
   it("updateWatchPrice flips triggered=true when price <= target", () => {
     const w = addWatch("B0TRIG01", "US", 30);
-    updateWatchPrice(w.id, 28); // below target
-    const reloaded = listWatches().find((x) => x.id === w.id);
-    expect(reloaded?.triggered).toBe(true);
-    expect(reloaded?.lastPrice).toBe(28);
-  });
+    expect(w.triggered).toBe(false);
 
-  it("updateWatchPrice above target does NOT trigger", () => {
-    const w = addWatch("B0NOTRIG", "US", 30);
-    updateWatchPrice(w.id, 45); // above target
-    const reloaded = listWatches().find((x) => x.id === w.id);
-    expect(reloaded?.triggered).toBe(false);
-    expect(reloaded?.lastPrice).toBe(45);
+    updateWatchPrice(w.id, 35);
+    expect(listWatches().find((x) => x.id === w.id)?.triggered).toBe(false);
+
+    updateWatchPrice(w.id, 30);
+    expect(listWatches().find((x) => x.id === w.id)?.triggered).toBe(true);
   });
 
   it("removeWatch returns true for an existing id and false for a missing one", () => {

@@ -38,6 +38,11 @@ function getDb(): Database.Database {
       value TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS session_cookies (
+      marketplace TEXT PRIMARY KEY,
+      cookies TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS watches (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       asin TEXT NOT NULL,
@@ -142,6 +147,55 @@ export async function getOrFetch<T>(
   const fresh = await fetcher();
   cacheSet(key, fresh, ttlSeconds);
   return fresh;
+}
+
+// --- Session cookies -------------------------------------------------------
+
+export function getSessionCookies(marketplace: string): string {
+  try {
+    const row = getDb()
+      .prepare("SELECT cookies, updated_at FROM session_cookies WHERE marketplace = ?")
+      .get(marketplace) as { cookies: string; updated_at: number } | undefined;
+    if (!row) {
+      return "";
+    }
+    // Discard cookies older than 7 days
+    if (nowEpochSeconds() - row.updated_at > 7 * 86400) {
+      getDb().prepare("DELETE FROM session_cookies WHERE marketplace = ?").run(marketplace);
+      return "";
+    }
+    return row.cookies;
+  } catch {
+    return "";
+  }
+}
+
+export function saveSessionCookies(marketplace: string, cookies: string): void {
+  if (!cookies || !cookies.trim()) {
+    return;
+  }
+  try {
+    const now = nowEpochSeconds();
+    getDb()
+      .prepare(
+        "INSERT OR REPLACE INTO session_cookies (marketplace, cookies, updated_at) VALUES (?, ?, ?)"
+      )
+      .run(marketplace, cookies.trim(), now);
+  } catch {
+    // best-effort
+  }
+}
+
+export function clearSessionCookies(marketplace?: string): void {
+  try {
+    if (marketplace) {
+      getDb().prepare("DELETE FROM session_cookies WHERE marketplace = ?").run(marketplace);
+    } else {
+      getDb().prepare("DELETE FROM session_cookies").run();
+    }
+  } catch {
+    // best-effort
+  }
 }
 
 // --- Price watches ---------------------------------------------------------
